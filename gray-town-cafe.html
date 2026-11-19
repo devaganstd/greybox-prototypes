@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Gray Town Café greybox</title>
+<style>
+  html,body{margin:0;height:100%;background:#1c1c1e;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#eee}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;touch-action:none;background:#2a2a2c}
+  #btnPanel{position:fixed;top:6px;right:6px;z-index:5;width:34px;height:34px;border-radius:8px;border:1px solid #556;background:#333;color:#eee;font-size:18px;cursor:pointer}
+  #panel{position:fixed;top:0;right:0;bottom:0;width:min(390px,100vw);z-index:4;background:rgba(24,24,26,.96);overflow:auto;padding:46px 12px 20px;box-sizing:border-box;font-size:12px;display:none}
+  #panel h3{margin:14px 0 6px;font-size:13px;color:#ff8fa3}
+  #panel button{background:#38383c;color:#eee;border:1px solid #556;border-radius:6px;padding:5px 8px;margin:2px;font-size:12px;cursor:pointer}
+  #panel button.on{background:#ff8fa3;color:#222}
+  #panel label{display:flex;justify-content:space-between;align-items:center;gap:6px;margin:2px 0}
+  #panel input[type=number]{width:80px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;padding:2px 4px}
+  #panel textarea{width:100%;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font:11px monospace;box-sizing:border-box}
+  #panel pre{white-space:pre-wrap;font:11px/1.35 monospace;background:#1e1e20;padding:6px;border-radius:6px;margin:4px 0}
+  #panel table{border-collapse:collapse;font:11px monospace;width:100%}
+  #panel td,#panel th{border:1px solid #333;padding:2px 4px;text-align:right}
+  #panel th:first-child,#panel td:first-child{text-align:left}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<button id="btnPanel" title="Tuning + telemetry (T)">&#9881;</button>
+<div id="panel"></div>
+<script>
+'use strict';
+// Gray Town Café: retheme of the Lemonade Apocalypse greybox (05_greybox/lemonade-apocalypse) for the female Eatventure audience.
+// Unique B "Restore the Town" (every brightened townsperson colours the town; restored blocks give real economy effects)
+// + mechanic A "Hire" (a brightened townsperson can become staff, but then does not move into town).
+// ===== CONFIG: every tunable lives here =====
+const CONFIG = {
+  // true = labour comes from brightened townsfolk (Hire). false = baseline: staff bought with coins, everyone moves into town.
+  curedHired: true,
+  charStyle: 1,             // 0 = stickman, 1 = bean, 2 = mochi (toggle in panel)
+  spawnIntervalBase: 5.0, spawnIntervalMin: 1.2, signboardFactor: 0.9,
+  queueMax: 8, counterSpots: 4,
+  drinkTime: 0.5, brightenTime: 0.5, splashTime: 0.5, apronTime: 0.5, // hook: serve 0.5 + sip 0.5 + colour 0.5 + town splash 0.5 = 2.0 s
+  grayWalkSpeed: 40, brightSpeed: 70, staffSpeed: 90,
+  recoverStart: 0.6, recoverDuration: 30,
+  takeOrderTime: 0.3, deliverTime: 0.2, playerServeTime: 0.5,
+  rushFactor: 0.7, rushDuration: 3, rushCooldown: 5,
+  // Hire mode: rack slots, +1 each. Paid baseline: price per staff. Hire is cheaper in coins because it costs town progress instead.
+  apronCosts:     [15, 30, 60, 100, 160, 250, 400, 650, 1000, 1600, 2500],
+  paidHireCosts:  [10, 40, 80, 150, 250, 400, 650, 1000, 1600, 2500, 4000, 6500],
+  stations: [
+    { id: 'Lemonade',    basePrice: 5,  baseTime: 3.0, baseCost: 10,  unlockCost: 0,    color: '#FFD45E' },
+    { id: 'Peach Tea',   basePrice: 12, baseTime: 4.0, baseCost: 60,  unlockCost: 150,  color: '#FFA270' },
+    { id: 'Berry Latte', basePrice: 30, baseTime: 5.0, baseCost: 400, unlockCost: 1500, color: '#E77BB8' },
+  ],
+  pricePerLevel: 0.2, costGrowth: 1.2, milestones: [10, 25, 50, 75], milestoneTimeFactor: 0.85, maxLevel: 75,
+  signboardBaseCost: 50, signboardGrowth: 2.2, signboardMax: 12,
+  offlineRate: 0.5, offlineCapMin: 120,
+  newestStationWeight: 0.4,
+  // Two-state customers (PM lock 1 from Lemonade): gray townsfolk only order Lemonade; brightened ones re-queue for the full menu.
+  grayOnlyLemonade: true, grayPayFactor: 1.0, brightReorder: true, brightTwoDrinkChance: 0.3,
+  // Restore the Town. Points: +1 per brightened townsperson, +residentPoints when they move into town (not hired).
+  residentPoints: 2,
+  town: [
+    { name: 'Bakery',      pts: 10,   effect: 'spawn',  value: 0.9,  color: '#FFB86B', note: 'customers +11%' },
+    { name: 'Flower Shop', pts: 30,  effect: 'profit', value: 1.1,  color: '#FF8FA3', note: 'profit +10%' },
+    { name: 'Berry Farm',  pts: 70,  effect: 'berry',  value: 1,    color: '#C69CFF', note: 'unlocks Berry Latte' },
+    { name: 'Bus Stop',    pts: 150, effect: 'spawn',  value: 0.85, color: '#8FB8FF', note: 'customers +18%' },
+    { name: 'Bookshop',    pts: 300, effect: 'profit', value: 1.15, color: '#7FD1AE', note: 'profit +15%' },
+    { name: 'Park',        pts: 600, effect: 'spot',   value: 1,    color: '#9BD86B', note: '+1 counter spot' },
+    { name: 'Music Hall',  pts: 1100, effect: 'spawn',  value: 0.85, color: '#FFD45E', note: 'customers +18%' },
+    { name: 'Fountain',    pts: 2000, effect: 'profit', value: 1.25, color: '#6FD6E0', note: 'profit +25%' },
+  ],
+  rushProfitMult: 2, rushProfitDuration: 180, rushProfitStackMax: 1800,
+  seed: 7,
+};
+const PALETTE = ['#FF8FA3', '#FFB86B', '#7FD1AE', '#8FB8FF', '#C69CFF', '#FFD45E', '#6FD6E0'];
+const GRAY = '#9C9C9C';
+
+// ===== helpers =====
+const W = 390, H = 844;
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const lerp = (a, b, k) => a + (b - a) * k;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function hexLerp(a, b, k) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const r = Math.round(lerp(pa >> 16, pb >> 16, k)), g = Math.round(lerp(pa >> 8 & 255, pb >> 8 & 255, k)), bl = Math.round(lerp(pa & 255, pb & 255, k));
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
+}
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : Math.floor(n).toString();
+const mmss = s => s == null ? '–' : Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+
+// ===== layout (logical 390 x 844) =====
+const SPAWN = { x: -20, y: 120 }, EXIT = { x: 410, y: 118 };
+const queueSlot = i => ({ x: 330 - 36 * i, y: 152 });
+const spotPos = k => ({ x: 340 - 66 * k, y: 210 });
+const behindCounter = k => ({ x: 340 - 66 * k, y: 252 });
+const STATION_X = [80, 195, 310], STATION_Y = 330;
+const RACK = { x: 20, y: 505, w: 170, h: 100 }, RACK_PICK = { x: 105, y: 595 };
+const TOWNBOX = { x: 200, y: 505, w: 170, h: 100 };
+const blockRect = i => ({ x: 4 + i * 48, y: 46, w: 44, h: 26 + (i * 13 % 3) * 8 });
+const BTN_Y0 = 704, BTN_H = 64;
+const BUTTONS = [
+  { id: 'st0', x: 6, y: BTN_Y0, w: 122, h: BTN_H }, { id: 'st1', x: 134, y: BTN_Y0, w: 122, h: BTN_H }, { id: 'st2', x: 262, y: BTN_Y0, w: 122, h: BTN_H },
+  { id: 'rack', x: 6, y: BTN_Y0 + 70, w: 122, h: BTN_H }, { id: 'sign', x: 134, y: BTN_Y0 + 70, w: 122, h: BTN_H }, { id: 'rush', x: 262, y: BTN_Y0 + 70, w: 122, h: BTN_H },
+];
+
+// ===== economy =====
+const milestonesHit = (cfg, L) => cfg.milestones.filter(m => L >= m).length;
+const stPrice = (cfg, st) => st.def.basePrice * (1 + cfg.pricePerLevel * (st.level - 1)) * Math.pow(2, milestonesHit(cfg, st.level));
+const stTime = (cfg, st) => st.def.baseTime * Math.pow(cfg.milestoneTimeFactor, milestonesHit(cfg, st.level));
+const stUpCost = (cfg, st) => st.def.baseCost * Math.pow(cfg.costGrowth, st.level - 1);
+const stSlots = st => 1 + Math.floor(st.level / 25);
+const townEffect = (S, eff) => S.cfg.town.reduce((m, b, i) => S.blocks[i] != null && b.effect === eff ? (eff === 'spot' || eff === 'berry' ? m + b.value : m * b.value) : m, eff === 'spot' || eff === 'berry' ? 0 : 1);
+const spawnInterval = S => Math.max(S.cfg.spawnIntervalMin, S.cfg.spawnIntervalBase * Math.pow(S.cfg.signboardFactor, S.signboard) * townEffect(S, 'spawn'));
+const signCost = S => S.cfg.signboardBaseCost * Math.pow(S.cfg.signboardGrowth, S.signboard);
+const apronCap = S => 1 + S.apronLvl;
+function rackCost(S) {
+  const list = S.cfg.curedHired ? S.cfg.apronCosts : S.cfg.paidHireCosts, i = S.cfg.curedHired ? S.apronLvl : S.staff.length;
+  return i < list.length ? list[i] : null;
+}
+const labourCount = S => S.staff.length + S.pendingHire;
+const freeSlot = S => S.cfg.curedHired && S.hiring && labourCount(S) < apronCap(S);
+
+// ===== state =====
+function newGame(cfg, seed) {
+  return {
+    cfg, t: 0, coins: 0, earnedTotal: 0, brightened: 0, residents: 0, townPts: 0, townShown: 0, rng: mulberry32(seed ?? cfg.seed), nextId: 1,
+    customers: [], staff: [], queue: [], spots: Array(cfg.counterSpots).fill(null), orders: [],
+    stations: cfg.stations.map((d, i) => ({ def: d, level: i === 0 ? 1 : 0, busy: 0, rushT: 0, rushCd: 0, flash: 0 })),
+    signboard: 0, apronLvl: 0, pendingHire: 0, hiring: true, blocks: cfg.town.map(() => null), blockFlash: cfg.town.map(() => 0),
+    spawnT: 0.6, firstSpawned: false, player: { o: null, t: 0 }, playerServes: 0, rushUsed: 0,
+    rushProfitT: 0, earnBins: [], goals: Array(10).fill(null), fx: [], popup: null, banner: null,
+    tele: { staffAt: {}, queueFullSec: [], minutes: [], brightBins: [], hookAt: null },
+    ftue: { done: {}, shownAt: {} },
+  };
+}
+
+// ===== actions =====
+function costOf(S, id) {
+  if (id.startsWith('st')) {
+    const i = +id[2], st = S.stations[i]; if (!st) return null;
+    if (st.level === 0) return i === 2 && !townEffect(S, 'berry') ? null : st.def.unlockCost;
+    return st.level >= S.cfg.maxLevel ? null : stUpCost(S.cfg, st);
+  }
+  if (id === 'rack') return rackCost(S);
+  if (id === 'sign') return S.signboard >= S.cfg.signboardMax ? null : signCost(S);
+  return null;
+}
+const canBuy = (S, id) => { const c = costOf(S, id); return c != null && S.coins >= c; };
+function buy(S, id) {
+  if (!canBuy(S, id)) return false;
+  S.coins -= costOf(S, id);
+  if (id.startsWith('st')) {
+    const st = S.stations[+id[2]], before = milestonesHit(S.cfg, st.level);
+    st.level = st.level === 0 ? 1 : st.level + 1;
+    if (milestonesHit(S.cfg, st.level) > before) { st.flash = 1; addText(S, STATION_X[+id[2]], STATION_Y - 50, 'PRICE x2!', '#FFD45E'); }
+  } else if (id === 'rack') { if (S.cfg.curedHired) S.apronLvl++; else addStaff(S, -20, 420, false, PALETTE[S.staff.length % PALETTE.length]); }
+  else if (id === 'sign') S.signboard++;
+  return true;
+}
+const useRush = S => { S.rushProfitT = Math.min(S.cfg.rushProfitStackMax, S.rushProfitT + S.cfg.rushProfitDuration); S.rushUsed++; };
+function playerServe(S, cust) {
+  if (S.player.o) return false;
+  const o = S.orders.find(o => o.state === 'open' && (!cust || o.cust === cust)); if (!o) return false;
+  o.state = 'taken'; S.player.o = o; S.player.t = S.cfg.playerServeTime; S.playerServes++;
+  if (S.tele.hookAt == null) S.tele.hookAt = { tap: S.t };
+  return true;
+}
+function rushStation(S, i) { const st = S.stations[i]; if (st.level > 0 && st.rushCd <= 0) { st.rushT = S.cfg.rushDuration; st.rushCd = S.cfg.rushCooldown + S.cfg.rushDuration; } }
+function skipOffline(S, minutes) {
+  const m = Math.min(minutes, S.cfg.offlineCapMin), rate = S.tele.brightBins.slice(-300).reduce((a, b) => a + (b || 0), 0) / 5;
+  S.popup = { coins: S.cfg.offlineRate * avgCpm(S, 5) * m, bright: Math.round(S.cfg.offlineRate * rate * m), minutes: m };
+}
+function collectOffline(S, mult) { const p = S.popup; if (!p) return; earn(S, p.coins * mult, true); S.brightened += p.bright; addTown(S, p.bright); S.popup = null; }
+
+// ===== simulation =====
+const addText = (S, x, y, text, col) => S.fx.push({ type: 'text', x, y, text, col, life: 1.2 });
+function earn(S, amt, raw) {
+  const v = raw ? amt : amt * (S.rushProfitT > 0 ? S.cfg.rushProfitMult : 1) * townEffect(S, 'profit');
+  S.coins += v; S.earnedTotal += v; const b = Math.floor(S.t); S.earnBins[b] = (S.earnBins[b] || 0) + v; return v;
+}
+function cpmNow(S) { const b = Math.floor(S.t); let s = 0; for (let i = Math.max(0, b - 59); i <= b; i++) s += S.earnBins[i] || 0; return s * 60 / Math.min(60, Math.max(1, S.t)); }
+function avgCpm(S, mins) { const b = Math.floor(S.t), n = Math.min(mins * 60, Math.max(1, b)); let s = 0; for (let i = b - n; i < b; i++) s += S.earnBins[i] || 0; return s * 60 / n; }
+function addTown(S, n) {
+  S.townPts += n;
+  S.cfg.town.forEach((b, i) => {
+    if (S.blocks[i] == null && S.townPts >= b.pts) {
+      S.blocks[i] = S.t; S.blockFlash[i] = 1.2; S.banner = { text: b.name + ' restored! ' + b.note, t: 3 };
+      if (b.effect === 'spot') S.spots.push(null);
+    }
+  });
+}
+function pickItem(S) {
+  const un = S.stations.map((s, i) => s.level > 0 ? i : -1).filter(i => i >= 0);
+  if (un.length === 1) return un[0];
+  if (S.rng() < S.cfg.newestStationWeight) return un[un.length - 1];
+  const rest = un.slice(0, -1); return rest[Math.floor(S.rng() * rest.length)];
+}
+function spawnGray(S, x, y) {
+  const c = { id: S.nextId++, kind: 'gray', state: 'queue', x: x ?? SPAWN.x, y: y ?? SPAWN.y, face: 1, pending: 0, items: [], k: 0, pop: 0, walk: 0, t: 0, col: PALETTE[Math.floor(S.rng() * PALETTE.length)] };
+  S.customers.push(c); S.queue.push(c);
+}
+function addStaff(S, x, y, recovering, col) {
+  const s = { id: S.nextId++, state: 'idle', x, y, face: 1, age: recovering ? 0 : 1e9, o: null, t: 0, walk: 0, pop: 0.3, col };
+  S.staff.push(s); const n = S.staff.length; if (S.tele.staffAt[n] == null) S.tele.staffAt[n] = S.t; return s;
+}
+function moveTo(e, p, speed, dt) {
+  const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy);
+  if (d < 1) { e.x = p.x; e.y = p.y; return true; }
+  const s = Math.min(d, speed * dt); e.x += dx / d * s; e.y += dy / d * s; e.walk += s; if (Math.abs(dx) > 0.5) e.face = dx > 0 ? 1 : -1;
+  return s >= d;
+}
+function leaveSpot(S, c) { if (c.spot != null) { S.spots[c.spot] = null; c.spot = null; } }
+function becomeResident(S, c) { // moves into town: extra town points (the price of NOT hiring)
+  c.state = 'leave'; S.residents++; addTown(S, S.cfg.residentPoints);
+  S.fx.push({ type: 'splash', x: c.x, y: c.y - 20, tx: 0, ty: 0, block: nextBlockIdx(S), t: 0, col: c.col, n: S.cfg.residentPoints });
+}
+function routeBright(S, c) {
+  if (freeSlot(S)) { c.state = 'toRack'; S.pendingHire++; return; }
+  if (S.cfg.brightReorder && S.queue.length < S.cfg.queueMax) { c.state = 'queue'; S.queue.push(c); return; }
+  becomeResident(S, c);
+}
+const nextBlockIdx = S => { const i = S.blocks.findIndex(b => b == null); return i < 0 ? S.blocks.length - 1 : i; };
+function placeOrder(S, c) {
+  const n = c.kind === 'gray' ? 1 : (S.rng() < S.cfg.brightTwoDrinkChance ? 2 : 1);
+  c.items = []; for (let i = 0; i < n; i++) {
+    const item = c.kind === 'gray' && S.cfg.grayOnlyLemonade ? 0 : pickItem(S);
+    c.items.push(item); S.orders.push({ id: S.nextId++, cust: c, item, state: 'open', t: S.t });
+  }
+  c.pending = n; c.state = 'wait';
+}
+function pay(S, c) {
+  let sum = 0; c.items.forEach(i => sum += stPrice(S.cfg, S.stations[i]));
+  if (c.kind === 'gray') sum *= S.cfg.grayPayFactor;
+  addText(S, c.x, c.y - 56, '+' + fmt(earn(S, sum)), '#FFD45E');
+}
+function deliver(S, o) { o.cust.pending--; S.orders.splice(S.orders.indexOf(o), 1); }
+function stepCustomer(S, c, dt) {
+  const cfg = S.cfg, sp = c.kind === 'gray' ? cfg.grayWalkSpeed : cfg.brightSpeed;
+  if (c.pop > 0) c.pop -= dt;
+  switch (c.state) {
+    case 'queue': {
+      const i = S.queue.indexOf(c); c.arrived = moveTo(c, queueSlot(i), sp, dt);
+      if (i === 0 && c.arrived) { const k = S.spots.indexOf(null); if (k >= 0) { S.queue.shift(); S.spots[k] = c; c.spot = k; c.state = 'toSpot'; } }
+      break;
+    }
+    case 'toSpot': if (moveTo(c, spotPos(c.spot), sp, dt)) { c.face = 1; placeOrder(S, c); } break;
+    case 'wait': if (c.pending <= 0) { c.state = 'drink'; c.t = cfg.drinkTime; } break;
+    case 'drink': c.t -= dt; if (c.t <= 0) {
+      if (c.kind === 'gray') { c.state = 'brighten'; c.t = cfg.brightenTime; }
+      else { pay(S, c); leaveSpot(S, c); becomeResident(S, c); }
+    } break;
+    case 'brighten': c.t -= dt; c.k = clamp(1 - c.t / cfg.brightenTime, 0, 1);
+      if (c.t <= 0) {
+        c.kind = 'bright'; c.k = 1; c.pop = 0.25; S.brightened++;
+        const b = Math.floor(S.t); S.tele.brightBins[b] = (S.tele.brightBins[b] || 0) + 1;
+        if (S.tele.hookAt && S.tele.hookAt.bright == null) S.tele.hookAt.bright = S.t;
+        for (let i = 0; i < 10; i++) { const a = S.rng() * Math.PI * 2, v = 40 + S.rng() * 60; S.fx.push({ type: 'dot', x: c.x, y: c.y - 24, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 30, life: 0.6, col: c.col }); }
+        S.fx.push({ type: 'splash', x: c.x, y: c.y - 24, block: nextBlockIdx(S), t: 0, col: c.col, n: 1 });
+        addTown(S, 1); pay(S, c); leaveSpot(S, c); routeBright(S, c);
+      } break;
+    case 'toRack': if (moveTo(c, RACK_PICK, cfg.brightSpeed, dt)) { c.state = 'apron'; c.t = cfg.apronTime; } break;
+    case 'apron': c.t -= dt; if (c.t <= 0) { c.dead = true; S.pendingHire--; addStaff(S, c.x, c.y, true, c.col).face = c.face; addText(S, c.x, c.y - 56, '+1 STAFF', '#FF8FA3'); } break;
+    case 'leave': if (moveTo(c, EXIT, cfg.brightSpeed, dt)) c.dead = true; break;
+  }
+}
+const staffMult = (S, s) => s.age >= S.cfg.recoverDuration ? 1 : S.cfg.recoverStart + (1 - S.cfg.recoverStart) * s.age / S.cfg.recoverDuration;
+function stepStaff(S, s, dt) {
+  const cfg = S.cfg; s.age += dt; if (s.pop > 0) s.pop -= dt;
+  const m = staffMult(S, s), sp = cfg.staffSpeed * m;
+  switch (s.state) {
+    case 'idle': { const o = S.orders.find(o => o.state === 'open'); if (o) { o.state = 'taken'; s.o = o; s.state = 'toTake'; } else moveTo(s, { x: 60 + (s.id * 37 % 270), y: 268 }, sp * 0.5, dt); break; }
+    case 'toTake': if (moveTo(s, behindCounter(s.o.cust.spot), sp, dt)) { s.state = 'take'; s.t = cfg.takeOrderTime; } break;
+    case 'take': s.t -= dt * m; if (s.t <= 0) s.state = 'toStation'; break;
+    case 'toStation': {
+      const i = s.o.item, st = S.stations[i];
+      if (moveTo(s, { x: STATION_X[i] + (s.id % 3 - 1) * 14, y: STATION_Y - 40 }, sp, dt) && st.busy < stSlots(st)) { st.busy++; s.state = 'make'; s.t = s.tMax = stTime(cfg, st); s.face = 1; }
+      break;
+    }
+    case 'make': { const st = S.stations[s.o.item]; s.t -= dt * m / (st.rushT > 0 ? cfg.rushFactor : 1); if (s.t <= 0) { st.busy--; s.state = 'toDeliver'; } break; }
+    case 'toDeliver': if (moveTo(s, behindCounter(s.o.cust.spot), sp, dt)) { s.state = 'deliver'; s.t = cfg.deliverTime; } break;
+    case 'deliver': s.t -= dt; if (s.t <= 0) { deliver(S, s.o); s.o = null; s.state = 'idle'; } break;
+  }
+}
+const GOALS = [
+  ['Brighten 5 townsfolk', S => S.brightened >= 5],
+  ['3 staff', S => S.staff.length >= 3],
+  ['Unlock Peach Tea', S => S.stations[1].level > 0],
+  ['Lemonade Lv 10', S => S.stations[0].level >= 10],
+  ['Restore 3 town blocks', S => S.blocks.filter(b => b != null).length >= 3],
+  ['Unlock Berry Latte', S => S.stations[2].level > 0],
+  ['8 active staff', S => S.staff.length >= 8],
+  ['Brighten 250 townsfolk', S => S.brightened >= 250],
+  ['Peach Tea Lv 25', S => S.stations[1].level >= 25],
+  ['Restore the whole town', S => S.blocks.every(b => b != null)],
+];
+function step(S, dt) {
+  const cfg = S.cfg; S.t += dt;
+  if (!S.firstSpawned) { S.spawnT -= dt; if (S.spawnT <= 0) { spawnGray(S, 190, 120); S.firstSpawned = true; S.spawnT = 2; } }
+  else if (S.brightened > 0 || S.customers.length === 0) { S.spawnT -= dt; if (S.spawnT <= 0 && S.queue.length < cfg.queueMax) { spawnGray(S); S.spawnT = spawnInterval(S); } }
+  const minute = Math.floor(S.t / 60);
+  if (S.queue.length >= cfg.queueMax) S.tele.queueFullSec[minute] = (S.tele.queueFullSec[minute] || 0) + dt;
+  if (S.player.o) { S.player.t -= dt; if (S.player.t <= 0) { deliver(S, S.player.o); S.player.o = null; } }
+  for (const st of S.stations) { st.rushT -= dt; st.rushCd -= dt; st.flash = Math.max(0, st.flash - dt); }
+  S.blockFlash = S.blockFlash.map(f => Math.max(0, f - dt));
+  S.rushProfitT = Math.max(0, S.rushProfitT - dt);
+  if (S.banner && (S.banner.t -= dt) <= 0) S.banner = null;
+  for (const c of S.customers) stepCustomer(S, c, dt);
+  S.customers = S.customers.filter(c => !c.dead);
+  for (const s of S.staff) stepStaff(S, s, dt);
+  S.townShown += (S.townPts - S.townShown) * Math.min(1, dt / cfg.splashTime * 2.5); // town fill trails the splash
+  GOALS.forEach((g, i) => { if (S.goals[i] == null && g[1](S)) { S.goals[i] = S.t; addText(S, 195, 662, 'Goal done: ' + g[0], '#FF8FA3'); } });
+  while (minute >= 1 && S.tele.minutes.length < minute) {
+    const m = S.tele.minutes.length;
+    S.tele.minutes.push({ m: m + 1, staff: S.staff.length, bright: S.brightened, residents: S.residents, town: S.townPts, blocks: S.blocks.filter(b => b != null).length, cpm: Math.round(cpmNow(S)), qFull: Math.round(100 * (S.tele.queueFullSec[m] || 0) / 60) });
+  }
+  for (const f of S.fx) {
+    if (f.type === 'splash') { f.t += dt; if (f.t >= cfg.splashTime) f.life = 0; continue; }
+    f.life -= dt; if (f.type === 'dot') { f.x += f.vx * dt; f.y += f.vy * dt; f.vy += 120 * dt; } else f.y -= 20 * dt;
+  }
+  S.fx = S.fx.filter(f => f.type === 'splash' ? f.t < cfg.splashTime : f.life > 0);
+}
+
+// ===== bot (headless) =====
+function botAct(S, tapPolicy) {
+  if (!S.player.o && (tapPolicy === 'always' || S.staff.length === 0)) playerServe(S);
+  for (let guard = 0; guard < 20; guard++) {
+    const aff = ['st0', 'st1', 'st2', 'sign', 'rack'].filter(id => canBuy(S, id)).filter(id => {
+      if (id === 'rack') return S.cfg.curedHired ? labourCount(S) >= apronCap(S) && S.staff.length < S.botStaffMax : (S.staff.length < 2 || S.queue.length >= 3);
+      if (id === 'sign') return S.queue.length < S.cfg.queueMax;
+      return true;
+    });
+    if (!aff.length) return;
+    aff.sort((a, b) => (b === 'rack') - (a === 'rack') || costOf(S, a) - costOf(S, b));
+    if (!buy(S, aff[0])) return;
+  }
+}
+// mode: 'hire' (labour from brightened townsfolk) or 'paid' (coins buy staff, everyone moves into town)
+function runBot({ mode = 'hire', minutes = 30, seed = 1, tap = 'nostaff', staffMax = 99, overrides = {} } = {}) {
+  const cfg = Object.assign(JSON.parse(JSON.stringify(CONFIG)), overrides, { curedHired: mode === 'hire' });
+  const S = newGame(cfg, seed); S.botStaffMax = staffMax; let acc = 0;
+  while (S.t < minutes * 60) { step(S, 0.1); acc += 0.1; if (acc >= 1) { acc = 0; botAct(S, tap); } S.fx.length = 0; }
+  const q = S.tele.queueFullSec; let qs = 0; for (let i = 0; i < 10; i++) qs += q[i] || 0;
+  const mAt = m => S.tele.minutes[m - 1] || {};
+  return {
+    mode: mode + (staffMax < 99 ? '≤' + staffMax : ''), seed, staff1: S.tele.staffAt[1], staff5: S.tele.staffAt[5], staff10: S.tele.staffAt[10],
+    goals: S.goals.slice(), goalsDone: S.goals.filter(g => g != null).length, blocks: S.blocks.slice(),
+    cpm5: mAt(5).cpm, cpm10: mAt(10).cpm, cpm20: mAt(20).cpm, cpm30: mAt(30).cpm,
+    town10: mAt(10).town, town20: mAt(20).town, town30: mAt(30).town, blocks10: mAt(10).blocks, blocks20: mAt(20).blocks,
+    qFull1to10: Math.round(100 * qs / 600), earned: Math.round(S.earnedTotal), minutes: S.tele.minutes,
+  };
+}
+function compare({ minutes = 30, seeds = [1, 2, 3], tap = 'nostaff', overrides = {} } = {}) {
+  const rows = [];
+  for (const mode of ['hire', 'paid']) for (const seed of seeds) rows.push(runBot({ mode, minutes, seed, tap, overrides }));
+  return rows;
+}
+function selfTest() {
+  const a = runBot({ minutes: 6, seed: 3 }), b = runBot({ minutes: 6, seed: 3 });
+  const cfg = JSON.parse(JSON.stringify(CONFIG)); cfg.curedHired = true; const S = newGame(cfg, 5); S.botStaffMax = 99;
+  let over = 0, acc = 0;
+  for (let i = 0; i < 6000; i++) { step(S, 0.1); acc += 0.1; if (acc >= 1) { acc = 0; botAct(S, 'always'); } over = Math.max(over, S.staff.length - apronCap(S)); }
+  const r = {
+    deterministic: a.earned === b.earned,
+    staffNeverOverCap: over <= 0,
+    staffFromBrightened: S.staff.length > 0 && S.brightened >= S.staff.length + S.residents,
+    townPointsAddUp: S.townPts === S.brightened + S.residents * cfg.residentPoints,
+  };
+  for (const [k, v] of Object.entries(r)) console.assert(v, 'selfTest failed: ' + k);
+  return r;
+}
+
+// ===== rendering =====
+const cv = document.getElementById('c'); let ctx = cv.getContext('2d');
+let scale = 1;
+function resize() {
+  scale = Math.min(innerWidth / W, innerHeight / H); const dpr = window.devicePixelRatio || 1;
+  cv.style.width = W * scale + 'px'; cv.style.height = H * scale + 'px';
+  cv.width = Math.round(W * scale * dpr); cv.height = Math.round(H * scale * dpr);
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+// Cute townsperson. k = 0 gray/slumped/sleepy .. 1 coloured/upright/smiling. Feet at (x, y).
+function drawPerson(x, y, o) {
+  const { k = 1, col = '#FF8FA3', apron = false, face = 1, walk = 0, sx = 1, sy = 1, style = CONFIG.charStyle, wave = 0 } = o;
+  const c = hexLerp(GRAY, col, k), dark = hexLerp(c, '#000000', 0.3), slump = 1 - k;
+  const ph = Math.sin(walk * 0.25) * 3.5 * (1 - slump * 0.6);
+  ctx.save(); ctx.translate(x, y); ctx.scale(sx * face, sy);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  let hx, hy, hr; // head centre / radius for the face
+  if (style === 0) { // stickman: round head, line body
+    ctx.strokeStyle = dark; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(ph, 0); ctx.moveTo(0, -14); ctx.lineTo(-ph, 0); ctx.stroke();
+    ctx.translate(0, -14); ctx.rotate(slump * 0.3);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -16); ctx.stroke();
+    if (apron) { ctx.fillStyle = '#FFF4E6'; ctx.beginPath(); ctx.moveTo(-4, -12); ctx.lineTo(4, -12); ctx.lineTo(7, 2); ctx.lineTo(-7, 2); ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#FF8FA3'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.strokeStyle = dark; ctx.lineWidth = 3; }
+    const ay = lerp(2, -10, k) - wave * 10;
+    ctx.beginPath(); ctx.moveTo(0, -13); ctx.lineTo(6, -13 + lerp(12, 6, k)); ctx.moveTo(0, -13); ctx.lineTo(-6, ay); ctx.stroke();
+    hx = slump * 3; hy = -25; hr = 9;
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(hx, hy, hr, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = dark; ctx.lineWidth = 1.5; ctx.stroke();
+  } else if (style === 1) { // bean: chubby capsule, face on the upper half
+    ctx.fillStyle = dark; ctx.beginPath(); ctx.ellipse(-4 + ph * 0.5, -1, 4, 2.5, 0, 0, Math.PI * 2); ctx.ellipse(4 - ph * 0.5, -1, 4, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.translate(0, -2); ctx.rotate(slump * 0.28); ctx.scale(1 + slump * 0.06, 1 - slump * 0.1);
+    ctx.fillStyle = c; ctx.beginPath(); ctx.roundRect(-11, -32, 22, 32, 11); ctx.fill();
+    if (apron) { ctx.fillStyle = '#FFF4E6'; ctx.beginPath(); ctx.roundRect(-8, -14, 16, 13, 4); ctx.fill(); ctx.fillStyle = '#FF8FA3'; ctx.fillRect(-8, -14, 16, 2.5); }
+    ctx.strokeStyle = c; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(10, -14); ctx.lineTo(14, lerp(-6, -12, k) - wave * 10); ctx.moveTo(-10, -14); ctx.lineTo(-13, lerp(-6, -10, k)); ctx.stroke();
+    hx = 1 + slump * 2; hy = -22; hr = 9;
+  } else { // mochi: round blob with a sprout that perks up
+    ctx.fillStyle = dark; ctx.beginPath(); ctx.ellipse(-5 + ph * 0.4, -1, 3.5, 2.5, 0, 0, Math.PI * 2); ctx.ellipse(5 - ph * 0.4, -1, 3.5, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.translate(0, -2); ctx.scale(1 + slump * 0.12, 1 - slump * 0.15);
+    ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(0, -13, 14, 13, 0, 0, Math.PI * 2); ctx.fill();
+    if (apron) { ctx.fillStyle = '#FFF4E6'; ctx.beginPath(); ctx.roundRect(-7, -9, 14, 9, 4); ctx.fill(); ctx.fillStyle = '#FF8FA3'; ctx.fillRect(-7, -9, 14, 2); }
+    ctx.strokeStyle = hexLerp('#7a7a7a', '#4FAE5A', k); ctx.lineWidth = 2; // sprout: droops when gray
+    ctx.beginPath(); ctx.moveTo(0, -26); ctx.quadraticCurveTo(lerp(6, 1, k), lerp(-26, -33, k), lerp(9, 4, k), lerp(-22, -35, k)); ctx.stroke();
+    if (k > 0.6) { ctx.fillStyle = hexLerp('#4FAE5A', '#FF8FA3', (k - 0.6) / 0.4); ctx.beginPath(); ctx.arc(4, -35, 2.5 * (k - 0.6) / 0.4, 0, Math.PI * 2); ctx.fill(); }
+    if (wave) { ctx.strokeStyle = c; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(12, -14); ctx.lineTo(17, -22); ctx.stroke(); }
+    hx = 2; hy = -14; hr = 10;
+  }
+  // face: sleepy lines + frown when gray, dot eyes + smile + blush when bright
+  ctx.fillStyle = '#2b2b2b'; ctx.strokeStyle = '#2b2b2b'; ctx.lineWidth = 1.4;
+  const ex = hx + 2, ey = hy - 1 + slump * 2;
+  if (k < 0.5) { ctx.beginPath(); ctx.moveTo(ex - 5, ey); ctx.lineTo(ex - 2, ey); ctx.moveTo(ex + 2, ey); ctx.lineTo(ex + 5, ey); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.arc(ex - 3.5, ey, 1.6, 0, Math.PI * 2); ctx.arc(ex + 3.5, ey, 1.6, 0, Math.PI * 2); ctx.fill(); }
+  const smile = lerp(-1, 1, k);
+  ctx.beginPath(); ctx.moveTo(ex - 2.5, ey + 4.5 - smile); ctx.quadraticCurveTo(ex, ey + 4.5 + smile * 2, ex + 2.5, ey + 4.5 - smile); ctx.stroke();
+  if (k > 0.7) { ctx.fillStyle = 'rgba(255,120,150,' + ((k - 0.7) / 0.3 * 0.7) + ')'; ctx.beginPath(); ctx.ellipse(ex - 6, ey + 3, 2.2, 1.4, 0, 0, Math.PI * 2); ctx.ellipse(ex + 6, ey + 3, 2.2, 1.4, 0, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore();
+}
+function drawCup(x, y, item, s = 1) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = CONFIG.stations[item]?.color || '#FFD45E'; ctx.beginPath(); ctx.moveTo(-4.5, -11); ctx.lineTo(4.5, -11); ctx.lineTo(3.2, 0); ctx.lineTo(-3.2, 0); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(1, -11); ctx.lineTo(3, -16); ctx.stroke();
+  ctx.restore();
+}
+function popScale(p) { if (p <= 0) return [1, 1]; const k = 1 - p / 0.25; const sy = k < 0.4 ? lerp(1, 0.9, k / 0.4) : lerp(1.15, 1, (k - 0.4) / 0.6); return [2 - sy, sy]; }
+function button(b, label, sub, enabled, active) {
+  ctx.fillStyle = active ? '#5a3a46' : enabled ? '#3e4a44' : '#303032'; ctx.strokeStyle = enabled ? '#FF8FA3' : '#4a4a4e'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill(); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.font = 'bold 13px system-ui'; ctx.fillStyle = enabled ? '#f6f1ea' : '#8d8d90'; ctx.fillText(label, b.x + b.w / 2, b.y + 25);
+  ctx.font = '12px system-ui'; ctx.fillStyle = enabled ? '#FFD45E' : '#8d8d90'; ctx.fillText(sub, b.x + b.w / 2, b.y + 45);
+}
+function uiButtons(S) {
+  const out = [];
+  S.stations.forEach((st, i) => {
+    const c = costOf(S, 'st' + i), b = BUTTONS[i], name = ['Lemonade', 'Peach Tea', 'Berry Latte'][i];
+    if (st.level === 0) out.push([b, 'Unlock ' + name, c == null ? 'Restore Berry Farm' : fmt(c) + ' coins', canBuy(S, 'st' + i)]);
+    else out.push([b, (i === 2 ? 'Berry' : name) + ' Lv ' + st.level, c == null ? 'MAX' : 'Up ' + fmt(c), canBuy(S, 'st' + i)]);
+  });
+  const rc = rackCost(S);
+  out.push([BUTTONS[3], S.cfg.curedHired ? 'Apron Rack +1' : 'Hire staff', rc == null ? 'MAX' : fmt(rc) + ' coins', canBuy(S, 'rack')]);
+  out.push([BUTTONS[4], 'Signboard Lv ' + S.signboard, S.signboard >= S.cfg.signboardMax ? 'MAX' : fmt(signCost(S)) + ' coins', canBuy(S, 'sign')]);
+  out.push([BUTTONS[5], 'Sunny Rush', S.rushProfitT > 0 ? 'x2 ' + mmss(S.rushProfitT) : 'Free x2 3 min', true, S.rushProfitT > 0]);
+  return out;
+}
+const btnCenter = i => ({ x: BUTTONS[i].x + BUTTONS[i].w / 2, y: BUTTONS[i].y + 12 });
+const FTUE = [
+  { id: 'serve', text: 'Tap to serve', when: S => S.playerServes === 0 && S.spots.some(c => c && c.state === 'wait'), done: S => S.playerServes > 0, at: S => { const c = S.spots.find(c => c && c.state === 'wait'); return c ? { x: c.x - 30, y: c.y - 34 } : null; } },
+  { id: 'rack', text: S => S.cfg.curedHired ? '+1 staff slot' : 'Hire staff', when: S => canBuy(S, 'rack') && S.t > 20, done: S => S.apronLvl > 0 || (!S.cfg.curedHired && S.staff.length > 0), at: () => btnCenter(3) },
+  { id: 'lemon', text: 'Upgrade Lemonade', when: S => (S.apronLvl > 0 || !S.cfg.curedHired) && canBuy(S, 'st0'), done: S => S.stations[0].level >= 5, at: () => btnCenter(0) },
+  { id: 'town', text: 'Colour = town bonus!', when: S => S.blocks[0] != null, done: S => S.ftue.shownAt.town != null && S.t - S.ftue.shownAt.town > 4, at: () => ({ x: TOWNBOX.x + 85, y: TOWNBOX.y + 30 }) },
+  { id: 'hire', text: 'Tap: hire or let them move in', when: S => S.cfg.curedHired && S.staff.length >= 3, done: S => S.ftue.shownAt.hire != null && S.t - S.ftue.shownAt.hire > 5, at: () => ({ x: RACK.x + 85, y: RACK.y + 30 }) },
+  { id: 'tea', text: 'Unlock Peach Tea', when: S => canBuy(S, 'st1'), done: S => S.stations[1].level > 0, at: () => btnCenter(1) },
+  { id: 'sign', text: 'More customers', when: S => S.t > 300 && canBuy(S, 'sign'), done: S => S.signboard > 0, at: () => btnCenter(4) },
+  { id: 'rush', text: 'Free x2 profit!', when: S => S.t > 420, done: S => S.rushUsed > 0 || (S.ftue.shownAt.rush != null && S.t - S.ftue.shownAt.rush > 30), at: () => btnCenter(5) },
+];
+function activeFtue(S) {
+  for (const f of FTUE) {
+    if (S.ftue.done[f.id]) continue;
+    if (f.done(S)) { S.ftue.done[f.id] = true; continue; }
+    if (f.when(S)) { S.ftue.shownAt[f.id] ??= S.t; return f; }
+  }
+  return null;
+}
+function townFill(S, i) { const b = S.cfg.town[i], prev = i ? S.cfg.town[i - 1].pts : 0; return clamp((S.townShown - prev) / (b.pts - prev), 0, 1); }
+
+function render(S) {
+  const cfg = S.cfg, total = cfg.town[cfg.town.length - 1].pts, warm = clamp(S.townShown / total, 0, 1);
+  ctx.fillStyle = hexLerp('#2c2c2e', '#2f2a2e', warm); ctx.fillRect(0, 0, W, H);
+  // town: gray blocks fill with colour (bottom-up) as townsfolk brighten
+  ctx.fillStyle = hexLerp('#555558', '#9aa88f', warm); ctx.fillRect(0, 40, W, 140);
+  ctx.fillStyle = hexLerp('#4a4a4d', '#c9b9a3', warm); ctx.fillRect(0, 100, W, 34); // pavement
+  cfg.town.forEach((b, i) => {
+    const r = blockRect(i), base = r.y + 52, top = base - r.h - 20, h = r.h + 20, f = townFill(S, i), done = S.blocks[i] != null;
+    ctx.fillStyle = '#6a6a6d'; ctx.fillRect(r.x, top, r.w, h);
+    ctx.fillStyle = b.color; ctx.fillRect(r.x, top + h * (1 - f), r.w, h * f);
+    ctx.strokeStyle = S.blockFlash[i] > 0 ? '#fff' : '#808083'; ctx.lineWidth = S.blockFlash[i] > 0 ? 3 : 1; ctx.strokeRect(r.x, top, r.w, h);
+    ctx.fillStyle = done ? '#fff8' : '#0002'; for (let w = 0; w < 4; w++) ctx.fillRect(r.x + 6 + (w % 2) * 20, top + 8 + Math.floor(w / 2) * 14, 10, 8);
+    if (done) { for (let s = 0; s < 4; s++) { ctx.fillStyle = s % 2 ? '#fff' : b.color; ctx.fillRect(r.x + s * 11, base - 12, 11, 5); } ctx.fillStyle = b.color; for (let d = 0; d < 3; d++) { ctx.beginPath(); ctx.arc(r.x + 8 + d * 14, base - 2, 3, 0, Math.PI * 2); ctx.fill(); } }
+  });
+  // counter
+  ctx.fillStyle = '#8a6f5c'; ctx.fillRect(40, 216, 320, 18);
+  for (let i = 0; i < 16; i++) { ctx.fillStyle = i % 2 ? '#fff4e6' : '#FF8FA3'; ctx.fillRect(40 + i * 20, 234, 20, 6); }
+  ctx.fillStyle = '#3a2f28'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.fillText('G R A Y   T O W N   C A F É', 200, 229);
+  ctx.fillStyle = '#343436'; ctx.fillRect(0, 240, W, 258);
+  S.stations.forEach((st, i) => {
+    const x = STATION_X[i], y = STATION_Y;
+    ctx.fillStyle = st.level ? '#40403f' : '#2e2e30'; ctx.strokeStyle = st.flash > 0 ? '#FFD45E' : st.rushT > 0 ? '#fff' : '#55555a'; ctx.lineWidth = st.flash > 0 ? 4 : 2;
+    ctx.beginPath(); ctx.roundRect(x - 48, y - 22, 96, 64, 10); ctx.fill(); ctx.stroke();
+    ctx.globalAlpha = st.level ? 1 : 0.4; drawCup(x, y + 10, i, 2); ctx.globalAlpha = 1;
+    ctx.fillStyle = '#ddd'; ctx.font = '11px system-ui';
+    if (st.level) { ctx.fillText('Lv ' + st.level + '  ' + fmt(stPrice(cfg, st)) + 'c', x, y + 32); for (let k = 0; k < stSlots(st); k++) { ctx.fillStyle = k < st.busy ? '#FF8FA3' : '#555'; ctx.fillRect(x - 40 + k * 8, y - 18, 6, 4); } }
+    else ctx.fillText(i === 2 && !townEffect(S, 'berry') ? 'needs Berry Farm' : 'LOCKED ' + fmt(st.def.unlockCost), x, y + 32);
+    if (st.rushT > 0) { ctx.fillStyle = '#fff'; ctx.fillText('RUSH', x + 30, y - 10); }
+  });
+  // apron rack + hire toggle
+  ctx.fillStyle = '#303032'; ctx.beginPath(); ctx.roundRect(RACK.x, RACK.y, RACK.w, RACK.h, 12); ctx.fill();
+  ctx.textAlign = 'left'; ctx.fillStyle = '#ddd'; ctx.font = 'bold 12px system-ui';
+  if (cfg.curedHired) {
+    const cap = apronCap(S), used = S.staff.length + S.customers.filter(c => c.state === 'apron').length;
+    ctx.fillText('Apron Rack ' + S.staff.length + '/' + cap, RACK.x + 8, RACK.y + 16);
+    ctx.fillStyle = S.hiring ? '#7FD1AE' : '#FF8FA3'; ctx.beginPath(); ctx.roundRect(RACK.x + 100, RACK.y + 5, 64, 16, 8); ctx.fill();
+    ctx.fillStyle = '#222'; ctx.font = 'bold 10px system-ui'; ctx.fillText(S.hiring ? 'HIRING ON' : 'MOVE IN', RACK.x + 106, RACK.y + 17);
+    for (let i = 0; i < 12; i++) {
+      const hx = RACK.x + 14 + (i % 6) * 26, hy = RACK.y + 32 + Math.floor(i / 6) * 32;
+      if (i >= cap) { ctx.fillStyle = '#404043'; ctx.fillRect(hx, hy, 14, 2); continue; }
+      ctx.strokeStyle = '#999'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(hx + 14, hy); ctx.stroke();
+      if (i >= used) { ctx.fillStyle = '#FFF4E6'; ctx.beginPath(); ctx.roundRect(hx + 1, hy + 2, 12, 15, 3); ctx.fill(); ctx.fillStyle = '#FF8FA3'; ctx.fillRect(hx + 1, hy + 2, 12, 3); }
+    }
+  } else { ctx.fillText('Staff room (paid)', RACK.x + 8, RACK.y + 16); ctx.font = '11px system-ui'; ctx.fillText(S.staff.length + ' staff bought with coins', RACK.x + 8, RACK.y + 40); }
+  // town board
+  ctx.fillStyle = '#303032'; ctx.beginPath(); ctx.roundRect(TOWNBOX.x, TOWNBOX.y, TOWNBOX.w, TOWNBOX.h, 12); ctx.fill();
+  const nb = S.blocks.findIndex(b => b == null), nDone = S.blocks.filter(b => b != null).length;
+  ctx.fillStyle = '#ddd'; ctx.font = 'bold 12px system-ui'; ctx.fillText('Town ' + nDone + '/' + cfg.town.length + '  ·  ' + S.residents + ' moved in', TOWNBOX.x + 8, TOWNBOX.y + 16);
+  if (nb >= 0) {
+    const b = cfg.town[nb]; ctx.font = '11px system-ui'; ctx.fillStyle = b.color; ctx.fillText('Next: ' + b.name, TOWNBOX.x + 8, TOWNBOX.y + 38);
+    ctx.fillStyle = '#bbb'; ctx.fillText(b.note, TOWNBOX.x + 8, TOWNBOX.y + 54);
+    ctx.fillStyle = '#222'; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 66, 154, 10); ctx.fillStyle = b.color; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 66, 154 * townFill(S, nb), 10);
+    ctx.fillStyle = '#ddd'; ctx.fillText(Math.floor(S.townPts) + ' / ' + b.pts + ' colour', TOWNBOX.x + 8, TOWNBOX.y + 92);
+  } else { ctx.fillStyle = '#FFD45E'; ctx.fillText('Town fully restored!', TOWNBOX.x + 8, TOWNBOX.y + 40); }
+  // customers + staff, back to front
+  const people = S.customers.map(c => ['c', c]).concat(S.staff.map(s => ['s', s])).sort((a, b) => a[1].y - b[1].y);
+  for (const [type, e] of people) {
+    const [sx, sy] = popScale(e.pop);
+    if (type === 'c') {
+      const k = e.kind === 'bright' ? 1 : e.state === 'brighten' ? e.k : 0, sway = e.kind === 'gray' ? Math.sin(S.t * 1.5 + e.id) * 0.03 : 0;
+      drawPerson(e.x, e.y, { k, col: e.col, face: e.face, walk: e.walk * (e.kind === 'gray' ? 0.6 : 1), sx: sx + sway, sy, wave: e.pop > 0 ? 1 : 0, apron: e.state === 'apron' && e.t < cfg.apronTime * 0.5 });
+      if (e.state === 'wait') e.items.forEach((it, j) => { if (j < e.pending) drawCup(e.x - 6 + j * 13, e.y - 50, it, 0.9); });
+      if (e.state === 'drink') drawCup(e.x + 9 * e.face, e.y - 24, e.items[0], 0.9);
+      if (e.state === 'apron') { const k2 = 1 - e.t / cfg.apronTime; ctx.fillStyle = '#FFF4E6'; ctx.globalAlpha = 1 - Math.max(0, k2 - 0.5) * 2; ctx.fillRect(lerp(RACK.x + 60, e.x, Math.min(1, k2 * 2)) - 5, lerp(RACK.y + 40, e.y - 16, Math.min(1, k2 * 2)) - 6, 10, 12); ctx.globalAlpha = 1; }
+      if (S.player.o && S.player.o.cust === e) { ctx.fillStyle = '#000a'; ctx.fillRect(e.x - 14, e.y - 62, 28, 5); ctx.fillStyle = '#FFD45E'; ctx.fillRect(e.x - 14, e.y - 62, 28 * (1 - S.player.t / cfg.playerServeTime), 5); }
+    } else {
+      const k = Math.min(1, e.age / cfg.recoverDuration);
+      drawPerson(e.x, e.y, { k: lerp(0.75, 1, k), col: e.col, apron: true, face: e.face, walk: e.walk, sx, sy });
+      if (e.state === 'make') { ctx.fillStyle = '#000a'; ctx.fillRect(e.x - 12, e.y - 54, 24, 4); ctx.fillStyle = '#fff'; ctx.fillRect(e.x - 12, e.y - 54, 24 * (1 - e.t / e.tMax), 4); }
+      if ((e.state === 'toDeliver' || e.state === 'deliver') && e.o) drawCup(e.x + 10 * e.face, e.y - 18, e.o.item, 0.8);
+    }
+  }
+  // fx
+  for (const f of S.fx) {
+    if (f.type === 'splash') { // colour flies from the person into the block being restored
+      const r = blockRect(f.block), k = f.t / cfg.splashTime, tx = r.x + r.w / 2, ty = r.y + 20;
+      const px = lerp(f.x, tx, k), py = lerp(f.y, ty, k) - Math.sin(k * Math.PI) * 40;
+      ctx.fillStyle = f.col; ctx.globalAlpha = 0.9; ctx.beginPath(); ctx.arc(px, py, 4 + f.n * 1.5, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; continue;
+    }
+    ctx.globalAlpha = clamp(f.life * 2, 0, 1);
+    if (f.type === 'dot') { ctx.fillStyle = f.col; ctx.beginPath(); ctx.arc(f.x, f.y, 2.5, 0, Math.PI * 2); ctx.fill(); }
+    else { ctx.fillStyle = f.col; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(f.text, f.x, f.y); }
+  }
+  ctx.globalAlpha = 1;
+  // HUD
+  ctx.fillStyle = '#1e1e20'; ctx.fillRect(0, 0, W, 40);
+  ctx.textAlign = 'left'; ctx.font = 'bold 16px system-ui'; ctx.fillStyle = '#FFD45E'; ctx.fillText('● ' + fmt(S.coins), 10, 18);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText(fmt(cpmNow(S)) + '/min' + (S.rushProfitT > 0 ? '  x2' : ''), 10, 33);
+  ctx.textAlign = 'center'; ctx.font = 'bold 14px system-ui'; ctx.fillStyle = '#FF8FA3'; ctx.fillText('Brightened ' + S.brightened, 175, 18);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText(mmss(S.t) + (speed > 1 ? '  x' + speed : '') + (cfg.curedHired ? '' : '  BASELINE'), 175, 33);
+  ctx.textAlign = 'right'; ctx.font = 'bold 14px system-ui'; ctx.fillStyle = '#7FD1AE'; ctx.fillText('Staff ' + S.staff.length + (cfg.curedHired ? '/' + apronCap(S) : ''), 340, 18);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText('town ' + Math.round(100 * S.townPts / total) + '%', 340, 33);
+  if (S.banner) { ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(S.banner.text).width + 20; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.roundRect(195 - tw / 2, 184, tw, 24, 12); ctx.fill(); ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.fillText(S.banner.text, 195, 200); }
+  // goals
+  const gi = S.goals.findIndex(g => g == null), stars = S.goals.filter(g => g != null).length;
+  ctx.fillStyle = '#303032'; ctx.beginPath(); ctx.roundRect(6, 616, 378, 80, 12); ctx.fill();
+  ctx.textAlign = 'left'; ctx.font = 'bold 12px system-ui'; ctx.fillStyle = '#FFD45E'; ctx.fillText('★ ' + stars + '/10', 16, 636);
+  ctx.fillStyle = '#ddd'; ctx.font = '12px system-ui';
+  if (gi >= 0) { ctx.fillText('Goal ' + (gi + 1) + ': ' + GOALS[gi][0], 70, 636); const nx = S.goals.findIndex((g, i) => g == null && i > gi); if (nx >= 0) { ctx.fillStyle = '#888'; ctx.fillText('then: ' + GOALS[nx][0], 70, 654); } }
+  else ctx.fillText('Café complete! (next street = next build)', 70, 636);
+  for (let i = 0; i < 10; i++) { ctx.fillStyle = S.goals[i] != null ? '#FF8FA3' : '#444'; ctx.fillRect(16 + i * 36, 672, 30, 8); }
+  for (const [b, l, s, en, act] of uiButtons(S)) button(b, l, s, en, act);
+  // FTUE hand
+  const f = activeFtue(S);
+  if (f && !S.popup) {
+    const p = f.at(S);
+    if (p) {
+      const pulse = 1 + Math.sin(performance.now() / 150) * 0.15;
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.x, p.y, 16 * pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(p.x + 6, p.y + 8); ctx.lineTo(p.x + 22, p.y + 30); ctx.lineTo(p.x + 10, p.y + 30); ctx.closePath(); ctx.fill();
+      const txt = typeof f.text === 'function' ? f.text(S) : f.text; ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(txt).width + 16;
+      const bx = clamp(p.x - tw / 2, 4, W - tw - 4), by = p.y > 400 ? p.y - 52 : p.y + 36;
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.roundRect(bx, by, tw, 22, 8); ctx.fill(); ctx.fillStyle = '#222'; ctx.textAlign = 'left'; ctx.fillText(txt, bx + 8, by + 15);
+    }
+  }
+  if (S.popup) {
+    ctx.fillStyle = '#000b'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#343436'; ctx.beginPath(); ctx.roundRect(40, 300, 310, 200, 14); ctx.fill();
+    ctx.textAlign = 'center'; ctx.fillStyle = '#eee'; ctx.font = 'bold 15px system-ui'; ctx.fillText('While you were away (' + S.popup.minutes + ' min)', 195, 334);
+    ctx.font = '13px system-ui'; ctx.fillText(S.popup.bright + ' townsfolk brightened', 195, 362); ctx.fillStyle = '#FFD45E'; ctx.fillText('+' + fmt(S.popup.coins) + ' coins', 195, 384);
+    ctx.fillStyle = '#aaa'; ctx.font = '11px system-ui'; ctx.fillText('(offline adds town colour, not staff)', 195, 404);
+    button(POP_BTN[0], 'Collect', 'x1', true); button(POP_BTN[1], 'Watch ad', 'x2 (fake)', true, true);
+  }
+}
+const POP_BTN = [{ x: 60, y: 420, w: 130, h: 60 }, { x: 200, y: 420, w: 130, h: 60 }];
+
+// ===== input =====
+const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+cv.addEventListener('pointerdown', e => {
+  const r = cv.getBoundingClientRect(), p = { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
+  e.preventDefault();
+  if (G.popup) { if (inRect(p, POP_BTN[0])) collectOffline(G, 1); else if (inRect(p, POP_BTN[1])) collectOffline(G, 2); return; }
+  for (const b of BUTTONS) if (inRect(p, b)) { if (b.id === 'rush') useRush(G); else buy(G, b.id); return; }
+  if (inRect(p, RACK) && G.cfg.curedHired) { G.hiring = !G.hiring; return; } // Hire / Move in decision
+  if (p.y > 150 && p.y < 245) {
+    let best = null, bd = 60; for (const c of G.spots) if (c && c.state === 'wait' && G.orders.some(o => o.cust === c && o.state === 'open')) { const d = Math.abs(c.x - p.x); if (d < bd) { bd = d; best = c; } }
+    if (best) playerServe(G, best); return;
+  }
+  for (let i = 0; i < 3; i++) if (Math.abs(p.x - STATION_X[i]) < 50 && Math.abs(p.y - (STATION_Y + 10)) < 36) { rushStation(G, i); return; }
+});
+
+// ===== tuning panel =====
+let G = newGame(CONFIG), speed = 1;
+const panel = document.getElementById('panel');
+function buildPanel() {
+  let h = '<h3>Mode</h3>';
+  h += `<button id="mCH" class="${CONFIG.curedHired ? 'on' : ''}">Hire from townsfolk</button><button id="mPaid" class="${CONFIG.curedHired ? '' : 'on'}">Baseline: paid hire</button>`;
+  h += '<h3>Character style</h3>' + ['Stickman', 'Bean', 'Mochi'].map((n, i) => `<button data-style="${i}" class="${CONFIG.charStyle === i ? 'on' : ''}">${n}</button>`).join('') + '<canvas id="styleSheet" width="360" height="90" style="width:100%;background:#2a2a2c;border-radius:6px;margin-top:4px"></canvas>';
+  h += '<h3>Time</h3>' + [1, 4, 10].map(s => `<button data-speed="${s}" class="${speed === s ? 'on' : ''}">x${s}</button>`).join('') +
+    '<button id="bReset">Reset</button><button id="bSkip">Skip 1 hour (offline)</button><button id="bCoins">+1000 coins</button>';
+  h += '<h3>Telemetry (this session)</h3><pre id="tele"></pre><button id="bCopy">Copy JSON</button>';
+  h += '<h3>Bot comparison (headless)</h3><label>minutes <input type="number" id="botMin" value="30"></label><button id="bBot">Run: Hire vs Paid hire (seeds 1-3)</button><div id="botOut"></div>';
+  h += '<h3>CONFIG (live; arrays as JSON; Reset to restart)</h3>';
+  for (const [k, v] of Object.entries(CONFIG)) {
+    if (k === 'curedHired' || k === 'charStyle') continue;
+    if (typeof v === 'number') h += `<label>${k} <input type="number" step="any" data-k="${k}" value="${v}"></label>`;
+    else if (typeof v === 'boolean') h += `<label>${k} <input type="checkbox" data-k="${k}" ${v ? 'checked' : ''}></label>`;
+    else if (Array.isArray(v)) h += `<label style="display:block">${k}<textarea data-k="${k}" rows="${typeof v[0] === 'object' ? 8 : 1}">${JSON.stringify(v)}</textarea></label>`;
+  }
+  panel.innerHTML = h;
+  drawStyleSheet();
+  panel.querySelector('#mCH').onclick = () => { CONFIG.curedHired = true; G = newGame(CONFIG); buildPanel(); };
+  panel.querySelector('#mPaid').onclick = () => { CONFIG.curedHired = false; G = newGame(CONFIG); buildPanel(); };
+  panel.querySelectorAll('[data-style]').forEach(b => b.onclick = () => { CONFIG.charStyle = +b.dataset.style; buildPanel(); });
+  panel.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; buildPanel(); });
+  panel.querySelector('#bReset').onclick = () => { G = newGame(CONFIG); };
+  panel.querySelector('#bSkip').onclick = () => { skipOffline(G, 60); panel.style.display = 'none'; };
+  panel.querySelector('#bCoins').onclick = () => { G.coins += 1000; };
+  panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G) }, null, 1));
+  panel.querySelector('#bBot').onclick = () => {
+    const out = panel.querySelector('#botOut'); out.textContent = 'running...';
+    setTimeout(() => { const rows = compare({ minutes: +panel.querySelector('#botMin').value }); out.innerHTML = botTable(rows); console.log('[bot]', rows); }, 20);
+  };
+  panel.querySelectorAll('[data-k]').forEach(inp => inp.onchange = () => {
+    try { CONFIG[inp.dataset.k] = inp.type === 'checkbox' ? inp.checked : inp.tagName === 'TEXTAREA' ? JSON.parse(inp.value) : +inp.value; inp.style.borderColor = '#444'; }
+    catch { inp.style.borderColor = 'red'; }
+  });
+}
+function drawStyleSheet() { // the three gray -> bright steps for the selected style, for quick readability checks
+  const sc = panel.querySelector('#styleSheet'); if (!sc) return;
+  const main = ctx; ctx = sc.getContext('2d'); ctx.clearRect(0, 0, 360, 90); // draw with the same functions onto the sheet
+  try { [0, 0.35, 0.7, 1].forEach((k, i) => drawPerson(40 + i * 70, 82, { k, col: '#FF8FA3', sx: 1.6, sy: 1.6 })); drawPerson(320, 82, { k: 1, col: '#8FB8FF', apron: true, sx: 1.6, sy: 1.6 }); }
+  finally { ctx = main; }
+}
+function botTable(rows) {
+  let h = '<table><tr><th>mode/seed</th><th>staff5</th><th>staff10</th><th>goals</th><th>town10</th><th>town20</th><th>town30</th><th>cpm10</th><th>cpm20</th><th>cpm30</th></tr>';
+  for (const r of rows) h += `<tr><td>${r.mode} s${r.seed}</td><td>${mmss(r.staff5)}</td><td>${mmss(r.staff10)}</td><td>${r.goalsDone}</td><td>${r.town10 ?? '–'}</td><td>${r.town20 ?? '–'}</td><td>${r.town30 ?? '–'}</td><td>${r.cpm10 ?? '–'}</td><td>${r.cpm20 ?? '–'}</td><td>${r.cpm30 ?? '–'}</td></tr>`;
+  return h + '</table>';
+}
+function teleSummary(S) {
+  return { t: Math.round(S.t), mode: S.cfg.curedHired ? 'Hire' : 'Paid hire', style: ['stickman', 'bean', 'mochi'][S.cfg.charStyle], brightened: S.brightened, residents: S.residents, townPts: S.townPts,
+    staff: S.staff.length, coins: Math.round(S.coins), cpm: Math.round(cpmNow(S)), hookSeconds: S.tele.hookAt && S.tele.hookAt.bright != null ? +(S.tele.hookAt.bright - S.tele.hookAt.tap + S.cfg.splashTime).toFixed(2) : null,
+    staffAt: { 1: S.tele.staffAt[1], 5: S.tele.staffAt[5], 10: S.tele.staffAt[10] }, blocks: S.blocks.map(b => b == null ? null : Math.round(b)), goals: S.goals.map(g => g == null ? null : Math.round(g)),
+    queueFullPct1to10: Math.round(100 * S.tele.queueFullSec.slice(0, 10).reduce((a, b) => a + (b || 0), 0) / Math.max(1, Math.min(600, S.t))), minutes: S.tele.minutes };
+}
+function teleText(S) {
+  const T = teleSummary(S);
+  let s = `hook tap -> colour -> town splash: ${T.hookSeconds ?? '–'} s (target <= 2)\nfirst staff: ${mmss(T.staffAt[1])} | staff #5: ${mmss(T.staffAt[5])} | #10: ${mmss(T.staffAt[10])}\nqueue full m1-10: ${T.queueFullPct1to10}%\nblocks: ${T.blocks.map((b, i) => S.cfg.town[i].name.split(' ')[0] + ' ' + mmss(b)).join(', ')}\ngoals: ${T.goals.map((g, i) => (i + 1) + ':' + mmss(g)).join(' ')}\n\nmin staff bright moved town blk  cpm qFull%\n`;
+  for (const m of T.minutes.slice(-15)) s += `${String(m.m).padStart(3)} ${String(m.staff).padStart(5)} ${String(m.bright).padStart(6)} ${String(m.residents).padStart(5)} ${String(m.town).padStart(4)} ${String(m.blocks).padStart(3)} ${String(m.cpm).padStart(5)} ${String(m.qFull).padStart(5)}\n`;
+  return s;
+}
+document.getElementById('btnPanel').onclick = () => { const on = panel.style.display !== 'block'; panel.style.display = on ? 'block' : 'none'; if (on) buildPanel(); };
+addEventListener('keydown', e => { if (e.key === 't' || e.key === 'T') document.getElementById('btnPanel').click(); });
+
+let last = performance.now(), teleTimer = 0, logMin = 0;
+function frame(now) {
+  const real = Math.min(0.1, (now - last) / 1000); last = now;
+  if (!G.popup) { let rem = real * speed; while (rem > 0) { const d = Math.min(0.05, rem); step(G, d); rem -= d; } }
+  render(G);
+  teleTimer += real; if (teleTimer > 0.5 && panel.style.display === 'block') { teleTimer = 0; const el = document.getElementById('tele'); if (el) el.textContent = teleText(G); }
+  if (Math.floor(G.t / 60) > logMin) { logMin = Math.floor(G.t / 60); console.log('[tele]', JSON.stringify(G.tele.minutes[G.tele.minutes.length - 1])); }
+  requestAnimationFrame(frame);
+}
+window.GT = { CONFIG, newGame, step, render, buy, botAct, runBot, compare, selfTest, teleSummary, get G() { return G; } };
+console.log('[selfTest]', selfTest());
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

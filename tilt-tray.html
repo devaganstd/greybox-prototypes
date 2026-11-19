@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Tilt Tray greybox</title>
+<style>
+  :root { --bg:#ececec; --ink:#222; --mute:#777; --btn:#fff; --line:#cfcfcf; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:14px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overscroll-behavior:none; }
+  #app { max-width:480px; height:100dvh; margin:0 auto; display:flex; flex-direction:column; position:relative; }
+  header { padding:10px 16px 4px; display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  #lvName { font-weight:700; font-size:16px; }
+  #moves { font-variant-numeric:tabular-nums; font-size:16px; }
+  #sub { padding:0 16px; min-height:18px; color:var(--mute); font-size:13px; }
+  #stage { flex:1; min-height:0; touch-action:none; display:block; width:100%; }
+  footer { display:flex; gap:8px; padding:8px 16px calc(10px + env(safe-area-inset-bottom)); }
+  button { font:inherit; padding:10px 0; flex:1; border:1px solid var(--line); background:var(--btn); border-radius:8px; color:var(--ink); }
+  button:active { background:#ddd; }
+  #overlay { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(236,236,236,.82); }
+  #overlay .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:20px; width:min(300px, calc(100% - 32px)); text-align:center; }
+  #overlay h2 { margin:0 0 6px; font-size:22px; }
+  #overlay p { margin:0 0 14px; color:var(--mute); }
+  #overlay .row { display:flex; gap:8px; }
+  #debug { position:absolute; left:0; right:0; bottom:0; max-height:72dvh; overflow:auto; display:none;
+    background:#fff; border-top:1px solid var(--line); padding:12px 16px 16px; font-size:13px; z-index:5; }
+  #debug label { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  #debug select, #debug input[type=range] { flex:1; }
+  #debug table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; margin-top:6px; }
+  #debug td, #debug th { border-bottom:1px solid #eee; padding:3px 4px; text-align:right; }
+  #debug td:first-child, #debug th:first-child { text-align:left; }
+  #debug .row { display:flex; gap:8px; margin-top:8px; }
+  #debug button { padding:6px 0; }
+  #solTxt { color:var(--mute); min-height:18px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header><span id="lvName">Level 1</span><span id="moves">0 / 0</span></header>
+  <div id="sub"></div>
+  <canvas id="stage"></canvas>
+  <footer>
+    <button id="bUndo">Undo</button>
+    <button id="bRestart">Restart</button>
+    <button id="bDebug">Debug</button>
+  </footer>
+  <div id="overlay"><div class="card"><h2 id="ovTitle"></h2><p id="ovText"></p><div class="row" id="ovBtns"></div></div></div>
+  <div id="debug">
+    <b>Tuning / debug</b>
+    <label>Slide speed <input id="dSpeed" type="range" min="4" max="40" step="1"><span id="dSpeedV"></span> sel/dtk</label>
+    <label><input id="dPar" type="checkbox"> Tampilkan par (solver)</label>
+    <label><input id="dSol" type="checkbox"> Tampilkan solusi solver dari posisi sekarang</label>
+    <div id="solTxt"></div>
+    <label><input id="dGyro" type="checkbox"> Gyro (miringkan HP, ambang 20°)</label>
+    <label>Level <select id="dLevel"></select></label>
+    <b>Telemetri</b>
+    <table><thead><tr><th>Lv</th><th>hasil</th><th>tilt</th><th>par</th><th>restart</th><th>undo</th><th>no-op</th><th>buntu</th><th>detik</th></tr></thead><tbody id="tBody"></tbody></table>
+    <div class="row"><button id="tCopy">Copy JSON</button><button id="tClear">Clear</button><button id="dClose">Tutup</button></div>
+  </div>
+</div>
+
+<script>
+// ===== SIM-START (pure logic; also loaded by the node level checker) =====
+const COLORS = { r:'#e5484d', b:'#3e7bfa', g:'#30a46c', y:'#e8b400', p:'#8e4ec6' };
+const DIRS = { L:[-1,0], R:[1,0], U:[0,-1], D:[0,1] };
+const EMPTY = 0, WALL = 1, PEG = 2, STICKY = 3;
+
+// Level format: rows = ASCII grid. '.' empty, '#' wood obstacle, 'o' peg, '_' sticky tile,
+// lowercase colour letter = 1x1 block, uppercase run (horizontal, else vertical) = one long block.
+// holes: "<side><index><colour>[width]", side L/R/T/B, index = row (L/R) or column (T/B).
+function parseLevel(def) {
+  const H = def.rows.length, W = def.rows[0].length;
+  const fixed = new Uint8Array(W * H), blocks = [], used = new Set();
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const ch = def.rows[y][x], i = y * W + x;
+    if (ch === '#') fixed[i] = WALL; else if (ch === 'o') fixed[i] = PEG; else if (ch === '_') fixed[i] = STICKY;
+    else if (COLORS[ch]) blocks.push({ c: ch, x, y, w: 1, h: 1 });
+    else if (COLORS[ch.toLowerCase()] && !used.has(i)) {
+      let w = 1, h = 1;
+      while (def.rows[y][x + w] === ch) w++;
+      if (w === 1) while (y + h < H && def.rows[y + h][x] === ch) h++;
+      for (let a = 0; a < w; a++) for (let b = 0; b < h; b++) used.add((y + b) * W + x + a);
+      blocks.push({ c: ch.toLowerCase(), x, y, w, h });
+    }
+  }
+  const holes = (def.holes || []).map(s => {
+    const m = /^([LRTB])(\d+)([a-z])(\d*)$/.exec(s);
+    if (!m) throw new Error('bad hole ' + s);
+    return { side: m[1], i: +m[2], c: m[3], w: +m[4] || 1 };
+  });
+  return { W, H, fixed, blocks, holes, def };
+}
+
+function holeOpen(lv, side, i, c) {
+  return lv.holes.some(h => h.side === side && h.c === c && i >= h.i && i < h.i + h.w);
+}
+
+// One tilt: every block slides one cell per step, front-most first, until nothing moves.
+// Returns new blocks plus per-step paths for the animation.
+function tilt(lv, blocks, dir, wantPaths) {
+  const [dx, dy] = DIRS[dir], W = lv.W, H = lv.H;
+  const bs = blocks.map(b => ({ ...b })), n = bs.length;
+  const occ = new Int16Array(W * H).fill(-1);
+  const inB = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
+  const mark = (k, v) => { const b = bs[k];
+    for (let a = 0; a < b.w; a++) for (let c = 0; c < b.h; c++) if (inB(b.x + a, b.y + c)) occ[(b.y + c) * W + b.x + a] = v; };
+  for (let k = 0; k < n; k++) mark(k, k);
+  const lead = b => dx > 0 ? b.x + b.w : dx < 0 ? -b.x : dy > 0 ? b.y + b.h : -b.y;
+  const order = [...Array(n).keys()].sort((a, b) => lead(bs[b]) - lead(bs[a]));
+  const stopped = new Uint8Array(n), goneAt = new Int16Array(n).fill(-1);
+  const paths = wantPaths ? bs.map(b => [[b.x, b.y]]) : null;
+  const free = (k, x, y) => {
+    if (inB(x, y)) { const f = lv.fixed[y * W + x]; return (f === EMPTY || f === STICKY) && (occ[y * W + x] < 0 || occ[y * W + x] === k); }
+    if (x < 0 && y >= 0 && y < H) return dx < 0 && holeOpen(lv, 'L', y, bs[k].c);
+    if (x >= W && y >= 0 && y < H) return dx > 0 && holeOpen(lv, 'R', y, bs[k].c);
+    if (y < 0 && x >= 0 && x < W) return dy < 0 && holeOpen(lv, 'T', x, bs[k].c);
+    if (y >= H && x >= 0 && x < W) return dy > 0 && holeOpen(lv, 'B', x, bs[k].c);
+    return false;
+  };
+  let steps = 0;
+  for (;;) {
+    let moved = false;
+    for (const k of order) {
+      const b = bs[k];
+      if (goneAt[k] < 0 && !stopped[k]) {
+        let ok = true;
+        for (let a = 0; a < b.w && ok; a++) for (let c = 0; c < b.h && ok; c++) ok = free(k, b.x + a + dx, b.y + c + dy);
+        if (ok) {
+          mark(k, -1); b.x += dx; b.y += dy; mark(k, k); moved = true;
+          let inside = false, sticky = false;
+          for (let a = 0; a < b.w; a++) for (let c = 0; c < b.h; c++) {
+            const x = b.x + a, y = b.y + c;
+            if (!inB(x, y)) continue;
+            inside = true;
+            // only newly entered (leading) cells can trigger a sticky stop
+            if (lv.fixed[y * W + x] === STICKY && !(a + dx >= 0 && a + dx < b.w && c + dy >= 0 && c + dy < b.h)) sticky = true;
+          }
+          if (!inside) goneAt[k] = steps + 1; else if (sticky) stopped[k] = 1;
+        }
+      }
+      if (paths) paths[k].push([b.x, b.y]);
+    }
+    if (!moved) break;
+    steps++;
+  }
+  if (paths) paths.forEach(p => p.pop());
+  return { blocks: bs.filter((_, k) => goneAt[k] < 0), steps, paths, goneAt };
+}
+
+const stateKey = bs => bs.map(b => b.c + b.w + b.h + ':' + b.x + ',' + b.y).sort().join('|');
+
+// BFS over tilt sequences. Returns {path:'LDR..'} or {path:null, capped}.
+function solve(lv, blocks, cap = 200000) {
+  if (!blocks.length) return { path: '', states: 1 };
+  const seen = new Set([stateKey(blocks)]);
+  let frontier = [{ bs: blocks, path: '' }];
+  while (frontier.length) {
+    const next = [];
+    for (const s of frontier) for (const d of 'LRUD') {
+      const r = tilt(lv, s.bs, d, false);
+      if (!r.steps) continue;
+      if (!r.blocks.length) return { path: s.path + d, states: seen.size };
+      const k = stateKey(r.blocks);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      if (seen.size > cap) return { path: null, capped: true, states: seen.size };
+      next.push({ bs: r.blocks, path: s.path + d });
+    }
+    frontier = next;
+  }
+  return { path: null, capped: false, states: seen.size };
+}
+
+const LEVELS = [
+  { name: 'Tilt', hint: 'Swipe ke mana saja untuk memiringkan nampan', rows: [
+    '....',
+    '..r.',
+    '....',
+    '....'], holes: ['L0r4'] },
+  { name: 'Two at Once', hint: 'Semua balok ikut meluncur', rows: [
+    '....',
+    '....',
+    '.r.r',
+    '....'], holes: ['L0r4'] },
+  { name: 'Wrong Colour', hint: 'Lubang beda warna = dinding', rows: [
+    '....',
+    'r..b',
+    '....',
+    '....'], holes: ['L1r', 'R1b'] },
+  { name: 'Order Matters', hint: 'Urutan kemiringan menentukan', rows: [
+    '.....',
+    '.....',
+    '....b',
+    'r...b',
+    'r....'], holes: ['T0r', 'T1b'] },
+  { name: 'Wood Block', hint: 'Balok kayu tidak ikut bergerak', rows: [
+    '..r..',
+    '...b.',
+    '..#..',
+    '#r...',
+    '.....'], holes: ['L0r', 'B3b'] },
+  { name: 'Cascade', rows: [
+    'b..b.',
+    '..r..',
+    '...r.',
+    '..r..',
+    '.....'], holes: ['B0r', 'L0b'] },
+  { name: 'Long Block', hint: 'Balok panjang butuh lubang selebar badannya', rows: [
+    '...b.',
+    '..r..',
+    '...b.',
+    '.r...',
+    'RR...',
+    '.b...'], holes: ['T2r2', 'T4b'] },
+  { name: 'Jam', rows: [
+    'b..b.',
+    '.....',
+    'r....',
+    '.bBB.',
+    '.R.r.',
+    '.R...'], holes: ['L4r2', 'R3b'] },
+  { name: 'Three Colours', rows: [
+    '....rG',
+    '.rr..G',
+    '......',
+    '..g..#',
+    'b.g..b',
+    '......'], holes: ['L0r', 'L2b', 'L4g2'] },
+  { name: 'Chapter Test I', hint: 'Chapter test', moves: 10, rows: [
+    '...gbr',
+    '.g.r..',
+    '.....b',
+    '#b...r',
+    '......',
+    '.#.BB.'], holes: ['R0r', 'B4b2', 'T4g'] },
+  { name: 'Peg', hint: 'Peg: balok berhenti di depannya', rows: [
+    '..rb.',
+    '.....',
+    'o....',
+    '....r',
+    '...b.'], holes: ['R0r', 'B3b'] },
+  { name: 'Brake', rows: [
+    '.r...b',
+    '.rro..',
+    '.g....',
+    '..o...',
+    'g.....',
+    '..b...'], holes: ['L2r', 'L5r', 'T0b', 'R2g', 'R4g'] },
+  { name: 'Pegs & Wood', rows: [
+    'g...b.',
+    'b...r.',
+    '.....#',
+    '.bo.r.',
+    '....r.',
+    '#.og..'], holes: ['R0r', 'T0b', 'L0g'] },
+  { name: 'Breather', rows: [
+    '......',
+    'rg...g',
+    '......',
+    '......',
+    'r.#...',
+    '.b..b.'], holes: ['T4r', 'B0r', 'B4b', 'B1b', 'B5g'] },
+  { name: 'Sticky', hint: 'Sticky Tile: balok berhenti di atasnya', rows: [
+    '...rr.',
+    'gr_...',
+    '....b.',
+    '.b....',
+    '......',
+    '..._..',
+    '....g.'], holes: ['R6r', 'L3r', 'L6b', 'B4g', 'B0g'] },
+  { name: 'Sticky Peg', rows: [
+    '..._..',
+    '......',
+    'g.....',
+    '._.o..',
+    'rrb..b',
+    '..bg..',
+    '..g.r.'], holes: ['R6r', 'R4r', 'T2b', 'R5b', 'R3g', 'B5g'] },
+  { name: 'Triple', hint: 'Balok 1x3', rows: [
+    'b....#.',
+    '..b...b',
+    '....R.g',
+    'r...R..',
+    '...rRr.',
+    '.g..g..',
+    '.....#.'], holes: ['R3r3', 'B6b', 'L5b', 'L6g', 'T2g'] },
+  { name: 'Chapter Test II', hint: 'Chapter test: tilt pas-pasan', moves: 10, rows: [
+    '...g..',
+    '.r..B.',
+    '....B.',
+    '..g.#.',
+    'r.br_.',
+    '.gbb..',
+    'r..#o.'], holes: ['T0r', 'R0b2', 'L0g'] },
+];
+// ===== SIM-END =====
+
+// ---------- game ----------
+const $ = id => document.getElementById(id);
+const cv = $('stage'), ctx = cv.getContext('2d');
+const ARROW = { L: '←', R: '→', U: '↑', D: '↓' };
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('tilttray.' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('tilttray.' + k, JSON.stringify(v)); } catch (e) {} },
+};
+const opt = { speed: store.get('speed', 12), showPar: store.get('showPar', true), showSol: false, gyro: false };
+const parCache = {};
+let tele = store.get('tele', []);
+let G = null;          // current level state
+let anim = null, queued = [], drag = null, fx = [], lean = { x: 0, y: 0 }, shake = 0, bump = 0;
+
+function parOf(li) {
+  if (!(li in parCache)) { const lv = parseLevel(LEVELS[li]); const s = solve(lv, lv.blocks); parCache[li] = s.path ? s.path.length : null; }
+  return parCache[li];
+}
+
+function loadLevel(li) {
+  if (G && G.status === 'play' && G.tilts > 0) logTele('quit');
+  li = (li + LEVELS.length) % LEVELS.length;
+  const lv = parseLevel(LEVELS[li]), par = parOf(li);
+  G = { li, lv, blocks: lv.blocks, hist: [], moves: 0, limit: lv.def.moves || (par || 10) + 4, par,
+        status: 'play', tilts: 0, restarts: 0, undos: 0, noops: 0, t0: performance.now() };
+  anim = null; queued = []; fx = [];
+  store.set('level', li);
+  $('dLevel').value = li;
+  hideOverlay(); hud();
+}
+
+function restart() {
+  if (!G) return;
+  const keep = { restarts: G.restarts + 1, undos: G.undos, tilts: G.tilts, noops: G.noops, deads: G.deads, t0: G.t0 };
+  G.status = 'restarting';
+  loadLevel(G.li); Object.assign(G, keep); hud();
+}
+
+function undo() {
+  if (!G || anim || !G.hist.length || G.status === 'won') return;
+  G.blocks = G.hist.pop(); G.moves--; G.undos++; G.status = 'play';
+  hideOverlay(); hud();
+}
+
+function doTilt(dir) {
+  if (!G || G.status !== 'play') return;
+  if (anim) { if (queued.length < 3) queued.push(dir); return; }  // fast swipers: keep up to 3 buffered tilts
+  const r = tilt(G.lv, G.blocks, dir, true);
+  G.tilts++;
+  if (!r.steps) { G.noops++; shake = 0.18; return; }
+  G.hist.push(G.blocks); G.moves++;
+  anim = { dir, r, from: G.blocks, t: 0, lean: 0, spawned: new Set() };
+  hud();
+}
+
+function finishTilt() {
+  G.blocks = anim.r.blocks; anim = null; bump = 0.14;
+  if (!G.blocks.length) { G.status = 'won'; logTele('win'); showWin(); }
+  else if (G.moves >= G.limit) { G.status = 'lost'; showLost(); }
+  hud();
+  if (queued.length && G.status === 'play') doTilt(queued.shift()); else queued = [];
+}
+
+function logTele(result) {
+  tele.push({ lv: G.li + 1, result, tilts: G.moves, swipes: G.tilts, par: G.par, restarts: G.restarts, undos: G.undos,
+              noops: G.noops, deads: G.deads || 0, secs: Math.round((performance.now() - G.t0) / 100) / 10, at: new Date().toISOString() });
+  store.set('tele', tele); renderTele();
+}
+
+function hud() {
+  $('lvName').textContent = 'Level ' + (G.li + 1) + ' · ' + LEVELS[G.li].name;
+  $('moves').textContent = 'Tilt ' + G.moves + ' / ' + G.limit + (opt.showPar && G.par ? '  ·  par ' + G.par : '');
+  // deadlock check: tiny state spaces, so a BFS after every tilt is cheap
+  const s = anim ? null : solve(G.lv, G.blocks, 30000);
+  G.dead = !!(s && !s.path && !s.capped);
+  if (G.dead && G.status === 'play' && G.lastDeadAt !== G.moves) { G.deads = (G.deads || 0) + 1; G.lastDeadAt = G.moves; }
+  $('sub').textContent = G.dead && G.status === 'play' ? 'Buntu: tidak ada solusi dari sini. Undo?' : (LEVELS[G.li].hint || '');
+  $('sub').style.color = G.dead && G.status === 'play' ? '#c0392b' : '';
+  if (opt.showSol && s) {
+    $('solTxt').textContent = s.path ? 'Solusi dari sini (' + s.path.length + '): ' + [...s.path].map(d => ARROW[d]).join(' ')
+      : s.capped ? 'Solver: batas state tercapai' : 'Buntu: tidak bisa diselesaikan dari posisi ini (undo/restart)';
+  } else $('solTxt').textContent = '';
+}
+
+// ---------- overlay ----------
+function showOverlay(title, text, btns) {
+  $('ovTitle').textContent = title; $('ovText').textContent = text;
+  const row = $('ovBtns'); row.innerHTML = '';
+  for (const [label, fn] of btns) { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; row.appendChild(b); }
+  $('overlay').style.display = 'flex';
+}
+function hideOverlay() { $('overlay').style.display = 'none'; }
+function showWin() {
+  const p = G.par, m = G.moves, stars = !p ? '' : m <= p ? '★★★' : m <= p + 2 ? '★★☆' : '★☆☆';
+  setTimeout(() => showOverlay('Clear! ' + stars, m + ' tilt' + (p ? ' (par ' + p + ')' : ''),
+    [['Ulangi', () => loadLevel(G.li)], ['Next', () => loadLevel(G.li + 1)]]), 350);
+}
+function showLost() {
+  showOverlay('Out of tilts', 'Masih ada ' + G.blocks.length + ' balok di nampan.', [['Undo', undo], ['Restart', restart]]);
+}
+
+// ---------- render ----------
+let geo = null;
+function resize() {
+  const dpr = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  geo = null;
+}
+function layout() {
+  const r = cv.getBoundingClientRect(), { W, H } = G.lv, F = 0.5, pad = 16;
+  const cs = Math.floor(Math.min((r.width - 2 * pad) / (W + 2 * F), (r.height - 2 * pad) / (H + 2 * F), 72));
+  return { cs, f: F * cs, ox: Math.round((r.width - W * cs) / 2), oy: Math.round((r.height - H * cs) / 2), w: r.width, h: r.height };
+}
+function rrect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h); }
+function symbol(c, cx, cy, s) {
+  ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = Math.max(2, s * 0.22);
+  ctx.beginPath();
+  if (c === 'r') ctx.arc(cx, cy, s * 0.5, 0, 7);
+  else if (c === 'b') { ctx.moveTo(cx, cy - s * 0.55); ctx.lineTo(cx + s * 0.55, cy + s * 0.45); ctx.lineTo(cx - s * 0.55, cy + s * 0.45); }
+  else if (c === 'g') ctx.rect(cx - s * 0.45, cy - s * 0.45, s * 0.9, s * 0.9);
+  else if (c === 'y') { ctx.moveTo(cx, cy - s * 0.6); ctx.lineTo(cx + s * 0.6, cy); ctx.lineTo(cx, cy + s * 0.6); ctx.lineTo(cx - s * 0.6, cy); }
+  else if (c === 'p') { ctx.moveTo(cx - s * 0.5, cy); ctx.lineTo(cx + s * 0.5, cy); ctx.moveTo(cx, cy - s * 0.5); ctx.lineTo(cx, cy + s * 0.5); ctx.stroke(); return; }
+  ctx.closePath(); ctx.fill();
+}
+function holeRect(h, g) {
+  const { cs, f, ox, oy } = g, { W, H } = G.lv;
+  if (h.side === 'L') return [ox - f, oy + h.i * cs, f, h.w * cs];
+  if (h.side === 'R') return [ox + W * cs, oy + h.i * cs, f, h.w * cs];
+  if (h.side === 'T') return [ox + h.i * cs, oy - f, h.w * cs, f];
+  return [ox + h.i * cs, oy + H * cs, h.w * cs, f];
+}
+function drawBlock(b, px, py, g, scale) {
+  const { cs, ox, oy } = g, ins = Math.max(2, cs * 0.06);
+  const w = b.w * cs - 2 * ins, h = b.h * cs - 2 * ins;
+  const cx = ox + px * cs + b.w * cs / 2, cy = oy + py * cs + b.h * cs / 2;
+  const sx = scale ? scale[0] : 1, sy = scale ? scale[1] : 1;
+  ctx.fillStyle = COLORS[b.c];
+  rrect(cx - w * sx / 2, cy - h * sy / 2, w * sx, h * sy, cs * 0.14); ctx.fill();
+  symbol(b.c, cx, cy, cs * 0.18);
+}
+
+function draw(dt) {
+  const g = geo || (geo = layout()), { cs, f, ox, oy } = g, { W, H, fixed, holes } = G.lv;
+  ctx.clearRect(0, 0, g.w, g.h);
+  // lean: tray shifts slightly toward the tilt / drag direction
+  let tx = 0, ty = 0;
+  if (anim) { const [dx, dy] = DIRS[anim.dir]; tx = dx; ty = dy; }
+  else if (drag && drag.dir) { const [dx, dy] = DIRS[drag.dir]; tx = dx * 0.6; ty = dy * 0.6; }
+  lean.x += (tx - lean.x) * Math.min(1, dt * 18); lean.y += (ty - lean.y) * Math.min(1, dt * 18);
+  const sh = shake > 0 ? Math.sin(shake * 90) * 4 * (shake / 0.18) : 0;
+  ctx.save(); ctx.translate(lean.x * cs * 0.12 + sh, lean.y * cs * 0.12);
+  // frame (low edge darker = reads as tilt)
+  ctx.fillStyle = '#9b9b9b'; rrect(ox - f, oy - f, W * cs + 2 * f, H * cs + 2 * f, f * 0.6); ctx.fill();
+  const lowA = Math.min(1, Math.hypot(lean.x, lean.y));
+  if (lowA > 0.05) {
+    ctx.fillStyle = 'rgba(0,0,0,' + (0.28 * lowA) + ')';
+    if (lean.x < -0.05) ctx.fillRect(ox - f, oy - f, f, H * cs + 2 * f);
+    if (lean.x > 0.05) ctx.fillRect(ox + W * cs, oy - f, f, H * cs + 2 * f);
+    if (lean.y < -0.05) ctx.fillRect(ox - f, oy - f, W * cs + 2 * f, f);
+    if (lean.y > 0.05) ctx.fillRect(ox - f, oy + H * cs, W * cs + 2 * f, f);
+  }
+  ctx.fillStyle = '#dcdcdc'; ctx.fillRect(ox, oy, W * cs, H * cs);
+  ctx.strokeStyle = '#cbcbcb'; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = 1; x < W; x++) { ctx.moveTo(ox + x * cs + .5, oy); ctx.lineTo(ox + x * cs + .5, oy + H * cs); }
+  for (let y = 1; y < H; y++) { ctx.moveTo(ox, oy + y * cs + .5); ctx.lineTo(ox + W * cs, oy + y * cs + .5); }
+  ctx.stroke();
+  // holes
+  for (const h of holes) {
+    const [x, y, w, hh] = holeRect(h, g);
+    ctx.fillStyle = '#3a3a3a'; ctx.fillRect(x, y, w, hh);
+    ctx.fillStyle = COLORS[h.c]; ctx.globalAlpha = 0.75; ctx.fillRect(x + 2, y + 2, w - 4, hh - 4); ctx.globalAlpha = 1;
+    symbol(h.c, x + w / 2, y + hh / 2, Math.min(w, hh) * 0.22);
+  }
+  // fixed tiles
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const t = fixed[y * W + x], px = ox + x * cs, py = oy + y * cs;
+    if (t === WALL) { ctx.fillStyle = '#6e6e6e'; rrect(px + 2, py + 2, cs - 4, cs - 4, 4); ctx.fill();
+      ctx.strokeStyle = '#5a5a5a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(px + cs * .25, py + cs * .75); ctx.lineTo(px + cs * .75, py + cs * .25); ctx.stroke(); }
+    else if (t === PEG) { ctx.fillStyle = '#555'; ctx.beginPath(); ctx.arc(px + cs / 2, py + cs / 2, cs * 0.28, 0, 7); ctx.fill(); }
+    else if (t === STICKY) { ctx.fillStyle = '#c2c2c2'; ctx.fillRect(px + 1, py + 1, cs - 2, cs - 2); ctx.fillStyle = '#9a9a9a';
+      for (let a = 1; a < 4; a++) for (let b = 1; b < 4; b++) { ctx.beginPath(); ctx.arc(px + a * cs / 4, py + b * cs / 4, cs * 0.04, 0, 7); ctx.fill(); } }
+  }
+  // blocks, clipped to tray interior + hole slots so exiting blocks sink into the hole
+  ctx.save(); ctx.beginPath(); ctx.rect(ox, oy, W * cs, H * cs);
+  for (const h of holes) ctx.rect(...holeRect(h, g));
+  ctx.clip();
+  if (anim) {
+    anim.t += dt * opt.speed;
+    const t = Math.min(anim.t, anim.r.steps), k = Math.floor(t), fr = t - k;
+    anim.from.forEach((b, i) => {
+      const p = anim.r.paths[i], ga = anim.r.goneAt[i];
+      if (ga >= 0 && t >= ga) {
+        if (!anim.spawned.has(i)) { anim.spawned.add(i); spawnPop(b, p[ga], g); }
+        return;
+      }
+      const a = p[Math.min(k, p.length - 1)], c = p[Math.min(k + 1, p.length - 1)];
+      drawBlock(b, a[0] + (c[0] - a[0]) * fr, a[1] + (c[1] - a[1]) * fr, g);
+    });
+    if (anim.t >= anim.r.steps) finishTilt();
+  } else {
+    const s = bump > 0 ? 1 - Math.sin((bump / 0.14) * Math.PI) * 0.08 : 1;
+    const [dx, dy] = lastDir ? DIRS[lastDir] : [0, 0];
+    const sc = [dx ? s : 2 - s, dy ? s : 2 - s];
+    for (const b of G.blocks) drawBlock(b, b.x, b.y, g, bump > 0 ? sc : null);
+  }
+  ctx.restore();
+  // pop particles
+  fx = fx.filter(p => (p.life -= dt) > 0);
+  for (const p of fx) { p.x += p.vx * dt; p.y += p.vy * dt; ctx.globalAlpha = Math.max(0, p.life / 0.5);
+    ctx.fillStyle = p.col; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  if (shake > 0) shake -= dt;
+  if (bump > 0) bump -= dt;
+}
+function spawnPop(b, pos, g) {
+  const { cs, ox, oy } = g, cx = ox + (pos[0] + b.w / 2) * cs, cy = oy + (pos[1] + b.h / 2) * cs;
+  const [dx, dy] = DIRS[anim.dir];
+  for (let i = 0; i < 10; i++) {
+    const a = Math.atan2(-dy, -dx) + (Math.random() - 0.5) * 2.2, v = 60 + Math.random() * 140;
+    fx.push({ x: cx - dx * cs * 0.5, y: cy - dy * cs * 0.5, vx: Math.cos(a) * v, vy: Math.sin(a) * v, r: 2 + Math.random() * 3, life: 0.5, col: COLORS[b.c] });
+  }
+}
+
+let lastT = performance.now(), lastDir = null;
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  if (G) draw(dt);
+  requestAnimationFrame(frame);
+}
+
+// ---------- input ----------
+function tiltCmd(d) { lastDir = d; doTilt(d); }
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, dir: null }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.dir = Math.hypot(dx, dy) < 12 ? null : Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'R' : 'L') : (dy > 0 ? 'D' : 'U');
+});
+cv.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag = null;
+  if (Math.hypot(dx, dy) < 24) return;
+  tiltCmd(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'R' : 'L') : (dy > 0 ? 'D' : 'U'));
+});
+cv.addEventListener('pointercancel', () => { drag = null; });
+const KEYS = { ArrowLeft: 'L', ArrowRight: 'R', ArrowUp: 'U', ArrowDown: 'D', a: 'L', d: 'R', w: 'U', s: 'D' };
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (KEYS[e.key]) { e.preventDefault(); tiltCmd(KEYS[e.key]); }
+  else if (e.key === 'z' || e.key === 'Backspace') undo();
+  else if (e.key === 'r') restart();
+  else if (e.key === 'n' || (e.key === 'Enter' && G.status === 'won')) loadLevel(G.li + 1);
+  else if (e.key === 'p') loadLevel(G.li - 1);
+});
+
+// gyro: discrete tilt when the phone leans > 20° from where it was when enabled; re-arms under 8°
+let gyroBase = null, gyroArmed = true;
+function onOrient(e) {
+  if (e.beta == null) return;
+  if (!gyroBase) { gyroBase = [e.beta, e.gamma]; return; }
+  const db = e.beta - gyroBase[0], dg = e.gamma - gyroBase[1];
+  if (gyroArmed && Math.max(Math.abs(db), Math.abs(dg)) > 20) { gyroArmed = false; tiltCmd(Math.abs(dg) > Math.abs(db) ? (dg > 0 ? 'R' : 'L') : (db > 0 ? 'D' : 'U')); }
+  else if (Math.max(Math.abs(db), Math.abs(dg)) < 8) gyroArmed = true;
+}
+async function setGyro(on) {
+  opt.gyro = on; gyroBase = null; removeEventListener('deviceorientation', onOrient);
+  if (!on) return;
+  try { if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission(); } catch (e) {}
+  addEventListener('deviceorientation', onOrient);
+}
+
+// ---------- debug panel ----------
+function renderTele() {
+  $('tBody').innerHTML = tele.slice(-30).reverse().map(t =>
+    `<tr><td>${t.lv}</td><td>${t.result}</td><td>${t.tilts}</td><td>${t.par ?? '-'}</td><td>${t.restarts}</td><td>${t.undos}</td><td>${t.noops}</td><td>${t.deads ?? 0}</td><td>${t.secs}</td></tr>`).join('');
+}
+LEVELS.forEach((l, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (i + 1) + '. ' + l.name; $('dLevel').appendChild(o); });
+$('dSpeed').value = opt.speed; $('dSpeedV').textContent = opt.speed;
+$('dSpeed').oninput = e => { opt.speed = +e.target.value; $('dSpeedV').textContent = opt.speed; store.set('speed', opt.speed); };
+$('dPar').checked = opt.showPar; $('dPar').onchange = e => { opt.showPar = e.target.checked; store.set('showPar', opt.showPar); hud(); };
+$('dSol').onchange = e => { opt.showSol = e.target.checked; hud(); };
+$('dGyro').onchange = e => setGyro(e.target.checked);
+$('dLevel').onchange = e => loadLevel(+e.target.value);
+$('tCopy').onclick = () => { const s = JSON.stringify(tele, null, 1); navigator.clipboard ? navigator.clipboard.writeText(s).catch(() => prompt('JSON', s)) : prompt('JSON', s); };
+$('tClear').onclick = () => { tele = []; store.set('tele', tele); renderTele(); };
+$('dClose').onclick = () => { $('debug').style.display = 'none'; };
+$('bDebug').onclick = () => { const d = $('debug'); d.style.display = d.style.display === 'block' ? 'none' : 'block'; };
+$('bUndo').onclick = undo;
+$('bRestart').onclick = restart;
+addEventListener('resize', resize);
+
+resize(); renderTele();
+loadLevel(Math.min(store.get('level', 0), LEVELS.length - 1));
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

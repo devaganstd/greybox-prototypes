@@ -37,14 +37,17 @@ const CONFIG = {
   curedHired: true,
   charStyle: 1,             // 0 = stickman, 1 = bean, 2 = mochi (toggle in panel)
   spawnIntervalBase: 5.0, spawnIntervalMin: 1.2, signboardFactor: 0.9,
-  queueMax: 8, counterSpots: 4,
+  queueMax: 8, counterSpots: 5,
   drinkTime: 0.5, brightenTime: 0.5, splashTime: 0.5, apronTime: 0.5, // hook: serve 0.5 + sip 0.5 + colour 0.5 + town splash 0.5 = 2.0 s
   grayWalkSpeed: 40, brightSpeed: 70, staffSpeed: 90,
   recoverStart: 0.6, recoverDuration: 30,
   takeOrderTime: 0.3, deliverTime: 0.2, playerServeTime: 0.5,
   rushFactor: 0.7, rushDuration: 3, rushCooldown: 5,
-  // Hire mode: rack slots, +1 each. Paid baseline: price per staff. Hire is cheaper in coins because it costs town progress instead.
+  // Hire mode: rack slots, +1 each. Paid baseline: price per staff. Hire is cheaper in coins because it also costs RESIDENTS:
+  // each slot takes residents out of town (rackResidentCosts), and the rack can only grow with the town (staffCapBase + staffCapPerBlock x blocks).
   apronCosts:     [15, 30, 60, 100, 160, 250, 400, 650, 1000, 1600, 2500],
+  rackResidentCosts: [0, 2, 5, 10, 15, 20, 25, 30, 35, 40, 45],
+  staffCapBase: 4, staffCapPerBlock: 1,
   paidHireCosts:  [10, 40, 80, 150, 250, 400, 650, 1000, 1600, 2500, 4000, 6500],
   stations: [
     { id: 'Lemonade',    basePrice: 5,  baseTime: 3.0, baseCost: 10,  unlockCost: 0,    color: '#FFD45E' },
@@ -56,18 +59,19 @@ const CONFIG = {
   offlineRate: 0.5, offlineCapMin: 120,
   newestStationWeight: 0.4,
   // Two-state customers (PM lock 1 from Lemonade): gray townsfolk only order Lemonade; brightened ones re-queue for the full menu.
-  grayOnlyLemonade: true, grayPayFactor: 1.0, brightReorder: true, brightTwoDrinkChance: 0.3,
-  // Restore the Town. Points: +1 per brightened townsperson, +residentPoints when they move into town (not hired).
+  grayOnlyLemonade: true, grayPayFactor: 1.0, brightReorder: true, brightTwoDrinkChance: 0.2,
+  // Restore the Town. Colour points: +1 per brightened townsperson, +residentPoints when they move in.
+  // A block restores when BOTH its colour points and its current resident count (res) are reached.
   residentPoints: 2,
   town: [
-    { name: 'Bakery',      pts: 10,   effect: 'spawn',  value: 0.9,  color: '#FFB86B', note: 'customers +11%' },
-    { name: 'Flower Shop', pts: 30,  effect: 'profit', value: 1.1,  color: '#FF8FA3', note: 'profit +10%' },
-    { name: 'Berry Farm',  pts: 70,  effect: 'berry',  value: 1,    color: '#C69CFF', note: 'unlocks Berry Latte' },
-    { name: 'Bus Stop',    pts: 150, effect: 'spawn',  value: 0.85, color: '#8FB8FF', note: 'customers +18%' },
-    { name: 'Bookshop',    pts: 300, effect: 'profit', value: 1.15, color: '#7FD1AE', note: 'profit +15%' },
-    { name: 'Park',        pts: 600, effect: 'spot',   value: 1,    color: '#9BD86B', note: '+1 counter spot' },
-    { name: 'Music Hall',  pts: 1100, effect: 'spawn',  value: 0.85, color: '#FFD45E', note: 'customers +18%' },
-    { name: 'Fountain',    pts: 2000, effect: 'profit', value: 1.25, color: '#6FD6E0', note: 'profit +25%' },
+    { name: 'Bakery',      pts: 10,   res: 0,   effect: 'spawn',  value: 0.9,  color: '#FFB86B', note: 'customers +11%' },
+    { name: 'Flower Shop', pts: 30,   res: 10,  effect: 'profit', value: 1.1,  color: '#FF8FA3', note: 'profit +10%' },
+    { name: 'Berry Farm',  pts: 70,   res: 30,  effect: 'berry',  value: 1,    color: '#C69CFF', note: 'unlocks Berry Latte' },
+    { name: 'Bus Stop',    pts: 150,  res: 60,  effect: 'spawn',  value: 0.85, color: '#8FB8FF', note: 'customers +18%' },
+    { name: 'Bookshop',    pts: 300,  res: 110, effect: 'profit', value: 1.15, color: '#7FD1AE', note: 'profit +15%' },
+    { name: 'Park',        pts: 550,  res: 200, effect: 'spot',   value: 1,    color: '#9BD86B', note: '+1 counter spot' },
+    { name: 'Music Hall',  pts: 1000, res: 380, effect: 'spawn',  value: 0.85, color: '#FFD45E', note: 'customers +18%' },
+    { name: 'Fountain',    pts: 1800, res: 650, effect: 'profit', value: 1.25, color: '#6FD6E0', note: 'profit +25%' },
   ],
   rushProfitMult: 2, rushProfitDuration: 180, rushProfitStackMax: 1800,
   seed: 7,
@@ -89,14 +93,14 @@ const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).to
 const mmss = s => s == null ? '–' : Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
 // ===== layout (logical 390 x 844) =====
-const SPAWN = { x: -20, y: 120 }, EXIT = { x: 410, y: 118 };
-const queueSlot = i => ({ x: 330 - 36 * i, y: 152 });
-const spotPos = k => ({ x: 340 - 66 * k, y: 210 });
-const behindCounter = k => ({ x: 340 - 66 * k, y: 252 });
-const STATION_X = [80, 195, 310], STATION_Y = 330;
+const SPAWN = { x: -20, y: 192 }, EXIT = { x: 410, y: 190 };
+const queueSlot = i => ({ x: 330 - 36 * i, y: 222 });
+const spotPos = k => ({ x: 345 - 60 * k, y: 280 });
+const behindCounter = k => ({ x: 345 - 60 * k, y: 322 });
+const STATION_X = [80, 195, 310], STATION_Y = 400;
 const RACK = { x: 20, y: 505, w: 170, h: 100 }, RACK_PICK = { x: 105, y: 595 };
 const TOWNBOX = { x: 200, y: 505, w: 170, h: 100 };
-const blockRect = i => ({ x: 4 + i * 48, y: 46, w: 44, h: 26 + (i * 13 % 3) * 8 });
+const blockRect = i => { const h = 74 + (i * 37 % 3) * 20; return { x: 4 + i * 48, y: 168 - h, w: 44, h }; }; // tall town view behind the queue
 const BTN_Y0 = 704, BTN_H = 64;
 const BUTTONS = [
   { id: 'st0', x: 6, y: BTN_Y0, w: 122, h: BTN_H }, { id: 'st1', x: 134, y: BTN_Y0, w: 122, h: BTN_H }, { id: 'st2', x: 262, y: BTN_Y0, w: 122, h: BTN_H },
@@ -113,6 +117,15 @@ const townEffect = (S, eff) => S.cfg.town.reduce((m, b, i) => S.blocks[i] != nul
 const spawnInterval = S => Math.max(S.cfg.spawnIntervalMin, S.cfg.spawnIntervalBase * Math.pow(S.cfg.signboardFactor, S.signboard) * townEffect(S, 'spawn'));
 const signCost = S => S.cfg.signboardBaseCost * Math.pow(S.cfg.signboardGrowth, S.signboard);
 const apronCap = S => 1 + S.apronLvl;
+const townStaffCap = S => S.cfg.staffCapBase + S.cfg.staffCapPerBlock * S.blocks.filter(b => b != null).length;
+const rackResCost = S => S.cfg.curedHired ? (S.cfg.rackResidentCosts[S.apronLvl] || 0) : 0;
+// why the rack cannot grow right now (Hire mode only), or null
+function rackBlocked(S) {
+  if (!S.cfg.curedHired) return null;
+  if (apronCap(S) >= townStaffCap(S)) return 'restore ' + (S.cfg.town[nextBlockIdx(S)] || {}).name;
+  if (S.residents < rackResCost(S)) return 'needs ' + rackResCost(S) + ' residents';
+  return null;
+}
 function rackCost(S) {
   const list = S.cfg.curedHired ? S.cfg.apronCosts : S.cfg.paidHireCosts, i = S.cfg.curedHired ? S.apronLvl : S.staff.length;
   return i < list.length ? list[i] : null;
@@ -123,7 +136,7 @@ const freeSlot = S => S.cfg.curedHired && S.hiring && labourCount(S) < apronCap(
 // ===== state =====
 function newGame(cfg, seed) {
   return {
-    cfg, t: 0, coins: 0, earnedTotal: 0, brightened: 0, residents: 0, townPts: 0, townShown: 0, rng: mulberry32(seed ?? cfg.seed), nextId: 1,
+    cfg, t: 0, coins: 0, earnedTotal: 0, brightened: 0, residents: 0, movedIn: 0, residentsSpent: 0, townPts: 0, townShown: 0, rng: mulberry32(seed ?? cfg.seed), nextId: 1,
     customers: [], staff: [], queue: [], spots: Array(cfg.counterSpots).fill(null), orders: [],
     stations: cfg.stations.map((d, i) => ({ def: d, level: i === 0 ? 1 : 0, busy: 0, rushT: 0, rushCd: 0, flash: 0 })),
     signboard: 0, apronLvl: 0, pendingHire: 0, hiring: true, blocks: cfg.town.map(() => null), blockFlash: cfg.town.map(() => 0),
@@ -145,7 +158,7 @@ function costOf(S, id) {
   if (id === 'sign') return S.signboard >= S.cfg.signboardMax ? null : signCost(S);
   return null;
 }
-const canBuy = (S, id) => { const c = costOf(S, id); return c != null && S.coins >= c; };
+const canBuy = (S, id) => { const c = costOf(S, id); return c != null && S.coins >= c && !(id === 'rack' && rackBlocked(S)); };
 function buy(S, id) {
   if (!canBuy(S, id)) return false;
   S.coins -= costOf(S, id);
@@ -153,7 +166,7 @@ function buy(S, id) {
     const st = S.stations[+id[2]], before = milestonesHit(S.cfg, st.level);
     st.level = st.level === 0 ? 1 : st.level + 1;
     if (milestonesHit(S.cfg, st.level) > before) { st.flash = 1; addText(S, STATION_X[+id[2]], STATION_Y - 50, 'PRICE x2!', '#FFD45E'); }
-  } else if (id === 'rack') { if (S.cfg.curedHired) S.apronLvl++; else addStaff(S, -20, 420, false, PALETTE[S.staff.length % PALETTE.length]); }
+  } else if (id === 'rack') { if (S.cfg.curedHired) { const rc = rackResCost(S); S.residents -= rc; S.residentsSpent += rc; S.apronLvl++; } else addStaff(S, -20, 420, false, PALETTE[S.staff.length % PALETTE.length]); }
   else if (id === 'sign') S.signboard++;
   return true;
 }
@@ -182,12 +195,10 @@ function cpmNow(S) { const b = Math.floor(S.t); let s = 0; for (let i = Math.max
 function avgCpm(S, mins) { const b = Math.floor(S.t), n = Math.min(mins * 60, Math.max(1, b)); let s = 0; for (let i = b - n; i < b; i++) s += S.earnBins[i] || 0; return s * 60 / n; }
 function addTown(S, n) {
   S.townPts += n;
-  S.cfg.town.forEach((b, i) => {
-    if (S.blocks[i] == null && S.townPts >= b.pts) {
-      S.blocks[i] = S.t; S.blockFlash[i] = 1.2; S.banner = { text: b.name + ' restored! ' + b.note, t: 3 };
-      if (b.effect === 'spot') S.spots.push(null);
-    }
-  });
+  for (let i = nextBlockIdx(S), b = S.cfg.town[i]; S.blocks[i] == null && S.townPts >= b.pts && S.residents >= (b.res || 0); i = nextBlockIdx(S), b = S.cfg.town[i]) {
+    S.blocks[i] = S.t; S.blockFlash[i] = 1.2; S.banner = { text: b.name + ' restored! ' + b.note, t: 3 };
+    if (b.effect === 'spot') S.spots.push(null);
+  }
 }
 function pickItem(S) {
   const un = S.stations.map((s, i) => s.level > 0 ? i : -1).filter(i => i >= 0);
@@ -211,7 +222,7 @@ function moveTo(e, p, speed, dt) {
 }
 function leaveSpot(S, c) { if (c.spot != null) { S.spots[c.spot] = null; c.spot = null; } }
 function becomeResident(S, c) { // moves into town: extra town points (the price of NOT hiring)
-  c.state = 'leave'; S.residents++; addTown(S, S.cfg.residentPoints);
+  c.state = 'leave'; S.residents++; S.movedIn++; addTown(S, S.cfg.residentPoints);
   S.fx.push({ type: 'splash', x: c.x, y: c.y - 20, tx: 0, ty: 0, block: nextBlockIdx(S), t: 0, col: c.col, n: S.cfg.residentPoints });
 }
 function routeBright(S, c) {
@@ -268,7 +279,7 @@ function stepStaff(S, s, dt) {
   const cfg = S.cfg; s.age += dt; if (s.pop > 0) s.pop -= dt;
   const m = staffMult(S, s), sp = cfg.staffSpeed * m;
   switch (s.state) {
-    case 'idle': { const o = S.orders.find(o => o.state === 'open'); if (o) { o.state = 'taken'; s.o = o; s.state = 'toTake'; } else moveTo(s, { x: 60 + (s.id * 37 % 270), y: 268 }, sp * 0.5, dt); break; }
+    case 'idle': { const o = S.orders.find(o => o.state === 'open'); if (o) { o.state = 'taken'; s.o = o; s.state = 'toTake'; } else moveTo(s, { x: 60 + (s.id * 37 % 270), y: 338 }, sp * 0.5, dt); break; }
     case 'toTake': if (moveTo(s, behindCounter(s.o.cust.spot), sp, dt)) { s.state = 'take'; s.t = cfg.takeOrderTime; } break;
     case 'take': s.t -= dt * m; if (s.t <= 0) s.state = 'toStation'; break;
     case 'toStation': {
@@ -311,7 +322,7 @@ function step(S, dt) {
   GOALS.forEach((g, i) => { if (S.goals[i] == null && g[1](S)) { S.goals[i] = S.t; addText(S, 195, 662, 'Goal done: ' + g[0], '#FF8FA3'); } });
   while (minute >= 1 && S.tele.minutes.length < minute) {
     const m = S.tele.minutes.length;
-    S.tele.minutes.push({ m: m + 1, staff: S.staff.length, bright: S.brightened, residents: S.residents, town: S.townPts, blocks: S.blocks.filter(b => b != null).length, cpm: Math.round(cpmNow(S)), qFull: Math.round(100 * (S.tele.queueFullSec[m] || 0) / 60) });
+    S.tele.minutes.push({ m: m + 1, staff: S.staff.length, bright: S.brightened, residents: S.residents, movedIn: S.movedIn, town: S.townPts, blocks: S.blocks.filter(b => b != null).length, cpm: Math.round(cpmNow(S)), qFull: Math.round(100 * (S.tele.queueFullSec[m] || 0) / 60) });
   }
   for (const f of S.fx) {
     if (f.type === 'splash') { f.t += dt; if (f.t >= cfg.splashTime) f.life = 0; continue; }
@@ -362,8 +373,10 @@ function selfTest() {
   const r = {
     deterministic: a.earned === b.earned,
     staffNeverOverCap: over <= 0,
-    staffFromBrightened: S.staff.length > 0 && S.brightened >= S.staff.length + S.residents,
-    townPointsAddUp: S.townPts === S.brightened + S.residents * cfg.residentPoints,
+    staffFromBrightened: S.staff.length > 0 && S.brightened >= S.staff.length + S.movedIn,
+    residentsBalance: S.residents === S.movedIn - S.residentsSpent && S.residents >= 0,
+    rackWithinTown: apronCap(S) <= townStaffCap(S),
+    townPointsAddUp: S.townPts === S.brightened + S.movedIn * cfg.residentPoints,
   };
   for (const [k, v] of Object.entries(r)) console.assert(v, 'selfTest failed: ' + k);
   return r;
@@ -448,7 +461,8 @@ function uiButtons(S) {
     else out.push([b, (i === 2 ? 'Berry' : name) + ' Lv ' + st.level, c == null ? 'MAX' : 'Up ' + fmt(c), canBuy(S, 'st' + i)]);
   });
   const rc = rackCost(S);
-  out.push([BUTTONS[3], S.cfg.curedHired ? 'Apron Rack +1' : 'Hire staff', rc == null ? 'MAX' : fmt(rc) + ' coins', canBuy(S, 'rack')]);
+  const rb = rackBlocked(S), rr = rackResCost(S);
+  out.push([BUTTONS[3], S.cfg.curedHired ? 'Apron Rack +1' : 'Hire staff', rc == null ? 'MAX' : rb || fmt(rc) + 'c' + (rr ? ' + ' + rr + ' res' : ''), canBuy(S, 'rack')]);
   out.push([BUTTONS[4], 'Signboard Lv ' + S.signboard, S.signboard >= S.cfg.signboardMax ? 'MAX' : fmt(signCost(S)) + ' coins', canBuy(S, 'sign')]);
   out.push([BUTTONS[5], 'Sunny Rush', S.rushProfitT > 0 ? 'x2 ' + mmss(S.rushProfitT) : 'Free x2 3 min', true, S.rushProfitT > 0]);
   return out;
@@ -478,21 +492,21 @@ function render(S) {
   const cfg = S.cfg, total = cfg.town[cfg.town.length - 1].pts, warm = clamp(S.townShown / total, 0, 1);
   ctx.fillStyle = hexLerp('#2c2c2e', '#2f2a2e', warm); ctx.fillRect(0, 0, W, H);
   // town: gray blocks fill with colour (bottom-up) as townsfolk brighten
-  ctx.fillStyle = hexLerp('#555558', '#9aa88f', warm); ctx.fillRect(0, 40, W, 140);
-  ctx.fillStyle = hexLerp('#4a4a4d', '#c9b9a3', warm); ctx.fillRect(0, 100, W, 34); // pavement
+  ctx.fillStyle = hexLerp('#555558', '#9aa88f', warm); ctx.fillRect(0, 40, W, 215);
+  ctx.fillStyle = hexLerp('#4a4a4d', '#c9b9a3', warm); ctx.fillRect(0, 168, W, 64); // pavement
   cfg.town.forEach((b, i) => {
-    const r = blockRect(i), base = r.y + 52, top = base - r.h - 20, h = r.h + 20, f = townFill(S, i), done = S.blocks[i] != null;
+    const r = blockRect(i), base = r.y + r.h, top = r.y, h = r.h, f = townFill(S, i), done = S.blocks[i] != null;
     ctx.fillStyle = '#6a6a6d'; ctx.fillRect(r.x, top, r.w, h);
     ctx.fillStyle = b.color; ctx.fillRect(r.x, top + h * (1 - f), r.w, h * f);
     ctx.strokeStyle = S.blockFlash[i] > 0 ? '#fff' : '#808083'; ctx.lineWidth = S.blockFlash[i] > 0 ? 3 : 1; ctx.strokeRect(r.x, top, r.w, h);
-    ctx.fillStyle = done ? '#fff8' : '#0002'; for (let w = 0; w < 4; w++) ctx.fillRect(r.x + 6 + (w % 2) * 20, top + 8 + Math.floor(w / 2) * 14, 10, 8);
+    ctx.fillStyle = done ? '#fff8' : '#0002'; for (let w = 0; w < 2 * Math.floor((h - 24) / 18); w++) ctx.fillRect(r.x + 6 + (w % 2) * 20, top + 10 + Math.floor(w / 2) * 18, 10, 10);
     if (done) { for (let s = 0; s < 4; s++) { ctx.fillStyle = s % 2 ? '#fff' : b.color; ctx.fillRect(r.x + s * 11, base - 12, 11, 5); } ctx.fillStyle = b.color; for (let d = 0; d < 3; d++) { ctx.beginPath(); ctx.arc(r.x + 8 + d * 14, base - 2, 3, 0, Math.PI * 2); ctx.fill(); } }
   });
   // counter
-  ctx.fillStyle = '#8a6f5c'; ctx.fillRect(40, 216, 320, 18);
-  for (let i = 0; i < 16; i++) { ctx.fillStyle = i % 2 ? '#fff4e6' : '#FF8FA3'; ctx.fillRect(40 + i * 20, 234, 20, 6); }
-  ctx.fillStyle = '#3a2f28'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.fillText('G R A Y   T O W N   C A F É', 200, 229);
-  ctx.fillStyle = '#343436'; ctx.fillRect(0, 240, W, 258);
+  ctx.fillStyle = '#8a6f5c'; ctx.fillRect(25, 286, 340, 18);
+  for (let i = 0; i < 17; i++) { ctx.fillStyle = i % 2 ? '#fff4e6' : '#FF8FA3'; ctx.fillRect(25 + i * 20, 304, 20, 6); }
+  ctx.fillStyle = '#3a2f28'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.fillText('G R A Y   T O W N   C A F É', 195, 299);
+  ctx.fillStyle = '#343436'; ctx.fillRect(0, 310, W, 188);
   S.stations.forEach((st, i) => {
     const x = STATION_X[i], y = STATION_Y;
     ctx.fillStyle = st.level ? '#40403f' : '#2e2e30'; ctx.strokeStyle = st.flash > 0 ? '#FFD45E' : st.rushT > 0 ? '#fff' : '#55555a'; ctx.lineWidth = st.flash > 0 ? 4 : 2;
@@ -525,8 +539,11 @@ function render(S) {
   if (nb >= 0) {
     const b = cfg.town[nb]; ctx.font = '11px system-ui'; ctx.fillStyle = b.color; ctx.fillText('Next: ' + b.name, TOWNBOX.x + 8, TOWNBOX.y + 38);
     ctx.fillStyle = '#bbb'; ctx.fillText(b.note, TOWNBOX.x + 8, TOWNBOX.y + 54);
-    ctx.fillStyle = '#222'; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 66, 154, 10); ctx.fillStyle = b.color; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 66, 154 * townFill(S, nb), 10);
-    ctx.fillStyle = '#ddd'; ctx.fillText(Math.floor(S.townPts) + ' / ' + b.pts + ' colour', TOWNBOX.x + 8, TOWNBOX.y + 92);
+    const rf = b.res ? clamp(S.residents / b.res, 0, 1) : 1;
+    ctx.fillStyle = '#222'; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 62, 154, 8); ctx.fillStyle = b.color; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 62, 154 * townFill(S, nb), 8);
+    ctx.fillStyle = '#ddd'; ctx.fillText(Math.floor(S.townPts) + '/' + b.pts + ' colour', TOWNBOX.x + 8, TOWNBOX.y + 82);
+    ctx.fillStyle = rf >= 1 ? '#7FD1AE' : '#FFB86B'; ctx.fillText(b.res ? S.residents + '/' + b.res + ' residents' : 'no residents needed', TOWNBOX.x + 86, TOWNBOX.y + 82);
+    ctx.fillStyle = '#222'; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 88, 154, 5); ctx.fillStyle = '#FFB86B'; ctx.fillRect(TOWNBOX.x + 8, TOWNBOX.y + 88, 154 * rf, 5);
   } else { ctx.fillStyle = '#FFD45E'; ctx.fillText('Town fully restored!', TOWNBOX.x + 8, TOWNBOX.y + 40); }
   // customers + staff, back to front
   const people = S.customers.map(c => ['c', c]).concat(S.staff.map(s => ['s', s])).sort((a, b) => a[1].y - b[1].y);
@@ -549,7 +566,7 @@ function render(S) {
   // fx
   for (const f of S.fx) {
     if (f.type === 'splash') { // colour flies from the person into the block being restored
-      const r = blockRect(f.block), k = f.t / cfg.splashTime, tx = r.x + r.w / 2, ty = r.y + 20;
+      const r = blockRect(f.block), k = f.t / cfg.splashTime, tx = r.x + r.w / 2, ty = r.y + r.h * 0.6;
       const px = lerp(f.x, tx, k), py = lerp(f.y, ty, k) - Math.sin(k * Math.PI) * 40;
       ctx.fillStyle = f.col; ctx.globalAlpha = 0.9; ctx.beginPath(); ctx.arc(px, py, 4 + f.n * 1.5, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; continue;
     }
@@ -565,8 +582,8 @@ function render(S) {
   ctx.textAlign = 'center'; ctx.font = 'bold 14px system-ui'; ctx.fillStyle = '#FF8FA3'; ctx.fillText('Brightened ' + S.brightened, 175, 18);
   ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText(mmss(S.t) + (speed > 1 ? '  x' + speed : '') + (cfg.curedHired ? '' : '  BASELINE'), 175, 33);
   ctx.textAlign = 'right'; ctx.font = 'bold 14px system-ui'; ctx.fillStyle = '#7FD1AE'; ctx.fillText('Staff ' + S.staff.length + (cfg.curedHired ? '/' + apronCap(S) : ''), 340, 18);
-  ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText('town ' + Math.round(100 * S.townPts / total) + '%', 340, 33);
-  if (S.banner) { ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(S.banner.text).width + 20; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.roundRect(195 - tw / 2, 184, tw, 24, 12); ctx.fill(); ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.fillText(S.banner.text, 195, 200); }
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText('Town ' + S.blocks.filter(b => b != null).length + '/' + cfg.town.length, 340, 33);
+  if (S.banner) { ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(S.banner.text).width + 20; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.roundRect(195 - tw / 2, 46, tw, 24, 12); ctx.fill(); ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.fillText(S.banner.text, 195, 62); }
   // goals
   const gi = S.goals.findIndex(g => g == null), stars = S.goals.filter(g => g != null).length;
   ctx.fillStyle = '#303032'; ctx.beginPath(); ctx.roundRect(6, 616, 378, 80, 12); ctx.fill();
@@ -608,7 +625,7 @@ cv.addEventListener('pointerdown', e => {
   if (G.popup) { if (inRect(p, POP_BTN[0])) collectOffline(G, 1); else if (inRect(p, POP_BTN[1])) collectOffline(G, 2); return; }
   for (const b of BUTTONS) if (inRect(p, b)) { if (b.id === 'rush') useRush(G); else buy(G, b.id); return; }
   if (inRect(p, RACK) && G.cfg.curedHired) { G.hiring = !G.hiring; return; } // Hire / Move in decision
-  if (p.y > 150 && p.y < 245) {
+  if (p.y > 220 && p.y < 315) {
     let best = null, bd = 60; for (const c of G.spots) if (c && c.state === 'wait' && G.orders.some(o => o.cust === c && o.state === 'open')) { const d = Math.abs(c.x - p.x); if (d < bd) { bd = d; best = c; } }
     if (best) playerServe(G, best); return;
   }

@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Shaft Collapse greybox</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0a09;color:#ddd;font:12px system-ui,sans-serif;overflow:hidden;-webkit-user-select:none;user-select:none}
+  #wrap{position:relative;height:100%;display:flex;justify-content:center;align-items:center}
+  canvas{touch-action:none;display:block;background:#14120F}
+  #bar{position:absolute;top:6px;right:6px;display:flex;gap:4px;z-index:5}
+  #bar button,.panel button{background:#2a2622;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 7px;font:11px system-ui;cursor:pointer}
+  #bar button.on{background:#5a4a20;border-color:#FFD23F}
+  .panel{position:absolute;top:36px;right:6px;max-height:calc(100% - 50px);overflow:auto;background:rgba(20,18,15,.96);border:1px solid #555;border-radius:6px;padding:8px;z-index:6;display:none;width:250px}
+  .panel h4{margin:6px 0 3px;color:#FFD23F;font-size:11px;text-transform:uppercase}
+  .panel label{display:flex;justify-content:space-between;align-items:center;gap:6px;margin:2px 0}
+  .panel input[type=number]{width:72px;background:#111;color:#eee;border:1px solid #444}
+  #stats div{display:flex;justify-content:space-between}
+  #stats b{color:#FFD23F;font-weight:600}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <div id="bar">
+    <button id="bMode">Pull the Prop</button>
+    <button id="bStats">Stats</button>
+    <button id="bTune">Tune</button>
+  </div>
+  <div class="panel" id="tune"></div>
+  <div class="panel" id="stats"></div>
+</div>
+<script>
+'use strict';
+// =====================================================================
+// CONFIG: semua angka tuning di sini. Panel "Tune" mengedit objek ini langsung.
+// =====================================================================
+const CFG_DEFAULT = {
+  // Block HP curve: hp rock = hpBase * hpGrowth^(face-1)
+  hpBase: 20, hpGrowth: 1.8, slabHpMult: 8, propHpMult: 0.6,
+  // Gravity / Cave-in Cascade
+  fallDamage: 10,          // damage = tinggi jatuh (sel) x bobot x fallDamage
+  rockWeight: 1, slabWeight: 3, propWeight: 0,
+  propsFall: false,        // false = Prop terpaku ke dinding (sesuai konsep); true = Prop ikut gravitasi
+  selfDamageRatio: 0.5,    // porsi damage yang diterima blok yang jatuh sendiri
+  momentumKeep: 1,         // sisa tinggi jatuh setelah menembus lapisan (1 = penuh)
+  chainMaxStart: 6, chainStep: 1, // multiplier rantai maks awal, + per upgrade
+  fallTickMs: 60,          // 1 sel per tick logika
+  wobbleSlabMs: 300, wobbleRockMs: 100, // antisipasi sebelum jatuh
+  // Miners
+  minerBaseDps: 2, minerDpsGrowth: 2, dpsUpgradeStep: 0.25, minersAvoidProps: true,
+  // Economy
+  goldPerHp: 0.25, oreMult: 3, minerCost: 15, minerCostGrowth: 1.2, mergeCost: 0,
+  spawnInterval: 15, autoMerge: false, startGold: 30,
+  upgSpawnCost: 150, upgSpawnGrowth: 5, upgDpsCost: 60, upgDpsGrowth: 2, upgChainCost: 300, upgChainGrowth: 2.2,
+  offlineRatio: 0.5,
+  // Feel
+  hitStopMs: 50, hitStopBigMs: 120, shake: 1, holdMs: 350, timeScale: 1,
+  // Sandbox "Pull the Prop"
+  sandboxInstantBreak: true, sandboxChainMax: 10,
+};
+const GROUPS = {
+  'Block HP curve': ['hpBase','hpGrowth','slabHpMult','propHpMult'],
+  'Fall / cascade': ['fallDamage','rockWeight','slabWeight','propWeight','propsFall','selfDamageRatio','momentumKeep','chainMaxStart','chainStep','fallTickMs','wobbleSlabMs','wobbleRockMs'],
+  'Miners': ['minerBaseDps','minerDpsGrowth','dpsUpgradeStep','minersAvoidProps'],
+  'Economy': ['goldPerHp','oreMult','minerCost','minerCostGrowth','mergeCost','spawnInterval','autoMerge','startGold','upgSpawnCost','upgSpawnGrowth','upgDpsCost','upgDpsGrowth','upgChainCost','upgChainGrowth','offlineRatio'],
+  'Feel / sandbox': ['hitStopMs','hitStopBigMs','shake','holdMs','timeScale','sandboxInstantBreak','sandboxChainMax'],
+};
+let CFG = Object.assign({}, CFG_DEFAULT);
+try { Object.assign(CFG, JSON.parse(localStorage.getItem('shaftCollapseCfg') || '{}')); } catch (e) {}
+function saveCfg() { try { localStorage.setItem('shaftCollapseCfg', JSON.stringify(CFG)); } catch (e) {} }
+
+// =====================================================================
+// LAYOUT (logical 360x640, 9:16)
+// =====================================================================
+const W = 360, H = 640, COLS = 8, ROWS = 12, CELL = 36, WX = 36, WY = 46;
+const FLOOR = WY + ROWS * CELL; // 478
+const SLOT = 50, DECK_X = 24, DECK_Y = 494, DECK_SLOTS = 12;
+const STRATA = ['#D9CBB0', '#D08A5E', '#8FB3D0'];
+const GOLD = '#F2B53A', MARK = '#FFD23F', WOOD = '#A0743F';
+
+// Face templates (12 baris x 8 kolom, baris 0 = atas)
+// r rock, o ore rock, b bedrock, S slab (lanjut '='), G ore slab, p prop (vertikal), . kosong
+const FACES = [
+  [ // F1 tutorial: satu Slab di atas satu Prop, rongga 3 sel
+    '........','........','........','..rorr..','..rrrr..','..S===..',
+    '....p...','....p...','....p...','rrrrrrrr','rorrrorr','rrrrrrrr'],
+  [ // F2 dua Slab, dua Prop: pilih urutan
+    '........','........','rrr..rro','ror..rrr','S==..S==','.p....p.',
+    '.p....p.','rrrrrrrr','rrrorrrr','rrrrrrrr','rorrrrro','rrrrrrrr'],
+  [ // F3 menara: Slab bertumpuk
+    '...rr...','..rrrr..','..S===..','...p....','...p....','..G===..',
+    '....p...','....p...','....p...','rrrrrrrr','rorrrror','rrrrrrrr'],
+  [ // F4 bedrock tepi, dua Slab
+    '........','.rrrrrr.','.rrorrr.','.rrrrrr.','bS===S=b','b.p..p.b',
+    'b.p..p.b','brrrrrrb','brorrrrb','brrrrorb','brrrrrrb','bbrrrrbb'],
+  [ // F5 "wrong prop": satu Prop umpan
+    '..rrrr..','..rorr..','..S===..','..p.....','..p..r..','..p..p..',
+    '..p..p..','rrrrrrrr','rrorrrro','rrrrrrrr','rorrrror','rrrrrrrr'],
+];
+const SANDBOX = [
+  { name: 'Mega Slab', rows: [
+    'brrrrrrb','brorrorb','brrorrrb','bS=====b','b...p..b','b...p..b',
+    'b...p..b','brrrrrrb','brorrorb','brrrrrrb','brrorrrb','bbrrrrbb'] },
+  { name: 'Tower', rows: FACES[2] },
+  { name: 'Wrong Prop', rows: FACES[4] },
+];
+
+// =====================================================================
+// SIMULATION (grid deterministik, tanpa physics engine)
+// =====================================================================
+function rng(seed) { return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296; }
+const idx = (x, y) => y * COLS + x;
+
+function newState(mode) {
+  return {
+    mode, face: 1, sandboxIdx: 0, gold: CFG.startGold, t: 0, acc: 0,
+    bodies: new Map(), grid: new Int32Array(COLS * ROWS), nextId: 1,
+    deck: Array(DECK_SLOTS).fill(0), targets: Array(DECK_SLOTS).fill(0),
+    spawnT: 0, mergeT: 0, buys: 0, upg: { spawn: 1, dps: 0, chain: 0 },
+    mark: 0, cascade: null, hitstop: 0, trauma: 0, clearT: 0, endCard: false, preview: null,
+    tut: mode === 'game' ? 0 : 2, sim: false,
+    fx: { dots: [], dust: [], texts: [] }, multPop: null,
+    tm: { firstMerge: null, firstCascade: null, firstBig: null, largest: 1, merges: 0, cascades: 0,
+          taps: 0, earned: 0, faces: 0, log: [[0, 0]], lastLog: 0 },
+  };
+}
+function place(S, b) { for (let j = 0; j < b.h; j++) for (let i = 0; i < b.w; i++) S.grid[idx(b.x + i, b.y + j)] = b.id; }
+function unplace(S, b) { for (let j = 0; j < b.h; j++) for (let i = 0; i < b.w; i++) S.grid[idx(b.x + i, b.y + j)] = 0; }
+function addBody(S, type, x, y, w, h, hp, ore) {
+  const weight = type === 'slab' ? CFG.slabWeight : type === 'prop' ? CFG.propWeight : type === 'rock' ? CFG.rockWeight : 0;
+  const b = { id: S.nextId++, type, x, y, w, h, hp, maxHp: hp, ore, weight, state: 'rest', wob: 0, fallH: 0, ry: y };
+  S.bodies.set(b.id, b); place(S, b); return b;
+}
+function buildLayout(S, rows, hpScale, seed) {
+  S.bodies.clear(); S.grid.fill(0); S.mark = 0; S.cascade = null; S.preview = null;
+  const r = rng(seed);
+  const hp = CFG.hpBase * hpScale;
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    let c = rows[y][x];
+    if (c === 'r' && seed > 0 && r() < 0.12) c = 'o'; // variasi prosedural ore
+    if (c === 'r' || c === 'o') addBody(S, 'rock', x, y, 1, 1, hp, c === 'o');
+    else if (c === 'b') addBody(S, 'bed', x, y, 1, 1, Infinity, false);
+    else if (c === 'S' || c === 'G') { let w = 1; while (rows[y][x + w] === '=') w++; addBody(S, 'slab', x, y, w, 1, hp * CFG.slabHpMult, c === 'G'); }
+    else if (c === 'p' && !(y > 0 && rows[y - 1][x] === 'p')) { let h = 1; while (y + h < ROWS && rows[y + h][x] === 'p') h++; addBody(S, 'prop', x, y, 1, h, Math.max(1, hp * CFG.propHpMult), false); }
+  }
+  settle(S); // template harus stabil saat muncul
+}
+function loadFace(S, n) {
+  S.face = n;
+  const tpl = FACES[(n - 1) % FACES.length];
+  buildLayout(S, tpl, Math.pow(CFG.hpGrowth, n - 1), n > FACES.length ? n * 7919 : 0);
+}
+function loadSandbox(S, i) {
+  S.sandboxIdx = i % SANDBOX.length; S.endCard = false;
+  buildLayout(S, SANDBOX[S.sandboxIdx].rows, 1, 0);
+}
+
+// sel di bawah body: id unik, atau floor
+function supports(S, b) {
+  const yb = b.y + b.h;
+  if (yb >= ROWS) return { floor: true, ids: [] };
+  const ids = [];
+  for (let i = 0; i < b.w; i++) { const id = S.grid[idx(b.x + i, yb)]; if (id && !ids.includes(id)) ids.push(id); }
+  return { floor: false, ids };
+}
+function sortedBodies(S) {
+  return [...S.bodies.values()].filter(b => b.type !== 'bed' && (CFG.propsFall || b.type !== 'prop')).sort((a, b) => (b.y + b.h) - (a.y + a.h) || a.id - b.id);
+}
+// Satu tick gravitasi. Diproses dari bawah ke atas supaya tumpukan bergerak serempak.
+function gravityTick(S, opt) {
+  const vac = new Map(); // sel yang baru dikosongkan body jatuh -> grup rantainya
+  let active = false;
+  for (const b of sortedBodies(S)) {
+    if (!S.bodies.has(b.id)) continue; // pecah di tick ini
+    const sup = supports(S, b);
+    if (sup.floor || sup.ids.length) {
+      if (b.state === 'fall') {
+        active = true;
+        // menumpang body yang masih jatuh (sedang menembus lapisan): tunggu, jangan mendarat
+        if (!sup.floor && sup.ids.every(id => S.bodies.get(id).state === 'fall')) continue;
+        impact(S, b, sup, opt);
+      } else if (b.state === 'wobble') b.state = 'rest';
+      continue;
+    }
+    active = true;
+    if (b.state === 'rest') {
+      // Rantai per runtuhan: body yang ikut jatuh karena tumpuannya ikut jatuh mewarisi grup itu.
+      let fromVac = null;
+      for (let i = 0; i < b.w; i++) { const g = vac.get(idx(b.x + i, b.y + b.h)); if (g && (!fromVac || g.chain > fromVac.chain)) fromVac = g; }
+      b.grp = fromVac || { chain: 0 };
+      const wob = (opt.noWobble || fromVac) ? 0 : (b.type === 'slab' ? CFG.wobbleSlabMs : CFG.wobbleRockMs);
+      if (wob > 0) { b.state = 'wobble'; b.wob = wob; continue; }
+      b.state = 'fall';
+    }
+    if (b.state === 'wobble') { if (b.wob > 0) continue; b.state = 'fall'; }
+    if (!S.sim && !S.cascade) S.cascade = { breaks: 0, gold: 0, maxMult: 1 };
+    unplace(S, b);
+    for (let i = 0; i < b.w; i++) vac.set(idx(b.x + i, b.y), b.grp);
+    b.y++; b.fallH++; place(S, b);
+  }
+  return active;
+}
+function impact(S, b, sup, opt) {
+  const dmg = opt.noDamage ? 0 : b.fallH * b.weight * CFG.fallDamage;
+  let allBroke = !sup.floor && dmg > 0;
+  if (dmg > 0) {
+    for (const id of sup.ids) {
+      const t = S.bodies.get(id);
+      if (t.type === 'bed') { allBroke = false; continue; }
+      t.hp -= dmg;
+      if (t.hp <= 0) breakBody(S, t, 'impact', b.grp); else allBroke = false;
+    }
+    if (!S.sim) {
+      const big = S.cascade && S.cascade.maxMult >= 5;
+      if (b.type === 'slab') { S.hitstop = Math.max(S.hitstop, big ? CFG.hitStopBigMs : CFG.hitStopMs); S.trauma = Math.min(1, S.trauma + (big ? 0.8 : 0.4)); }
+      dust(S, b, 6 + b.w * 3);
+    }
+    b.hp -= dmg * CFG.selfDamageRatio;
+    if (b.hp <= 0) { breakBody(S, b, 'impact', b.grp); return; }
+  }
+  if (allBroke) b.fallH = Math.max(1, Math.round(b.fallH * CFG.momentumKeep)); // tembus: tetap jatuh
+  else { b.state = 'rest'; b.fallH = 0; }
+}
+function settle(S) { // tanpa damage, tanpa antisipasi (dipakai saat load & pratinjau)
+  const sim = S.sim; S.sim = true;
+  for (let k = 0; k < 40 && gravityTick(S, { noDamage: true, noWobble: true }); k++);
+  for (const b of S.bodies.values()) { b.state = 'rest'; b.fallH = 0; b.ry = b.y; }
+  S.sim = sim;
+}
+const chainMax = S => S.mode === 'sandbox' ? CFG.sandboxChainMax : CFG.chainMaxStart + S.upg.chain * CFG.chainStep;
+
+function breakBody(S, b, cause, grp) {
+  unplace(S, b); S.bodies.delete(b.id);
+  if (S.mark === b.id) S.mark = 0;
+  if (S.sim) return;
+  let mult = 1;
+  if (cause === 'impact' && grp && S.cascade) {
+    // x2, x3, ... per blok yang pecah tertimpa dalam satu runtuhan
+    mult = Math.min(chainMax(S), 2 + grp.chain++);
+    S.cascade.breaks++;
+    S.cascade.maxMult = Math.max(S.cascade.maxMult, mult);
+    if (mult >= 3 && S.tm.firstCascade === null) S.tm.firstCascade = S.t;
+    if (mult >= 5 && S.tm.firstBig === null) S.tm.firstBig = S.t;
+    S.tm.largest = Math.max(S.tm.largest, mult);
+    if (mult >= 3) S.multPop = { v: mult, life: 1 };
+  }
+  const g = b.maxHp * CFG.goldPerHp * (b.ore ? CFG.oreMult : 1) * mult;
+  addGold(S, g);
+  if (S.cascade && cause === 'impact') S.cascade.gold += g;
+  dust(S, b, 4 + b.w * b.h * 3);
+  const cx = WX + (b.x + b.w / 2) * CELL, cy = WY + (b.y + b.h / 2) * CELL;
+  const n = Math.min(14, 2 + Math.round(Math.log2(1 + g / 10)));
+  for (let i = 0; i < n && S.fx.dots.length < 300; i++)
+    S.fx.dots.push({ x: cx + (Math.random() - .5) * b.w * CELL, y: cy, vx: (Math.random() - .5) * 60, vy: -Math.random() * 120, belt: false });
+  S.fx.texts.push({ x: cx, y: cy, txt: '+' + fmt(g), life: 1, col: mult > 1 ? GOLD : '#cfc6b4' });
+}
+function endCascade(S) {
+  const c = S.cascade; S.cascade = null;
+  if (c.maxMult >= 3) {
+    S.tm.cascades++;
+    S.fx.texts.push({ x: W / 2, y: WY + 150, txt: 'CAVE-IN  x' + c.maxMult + '  +' + fmt(c.gold), life: 2, col: MARK, size: 18 });
+    if (S.tut === 1 && c.maxMult >= 3) S.tut = 2;
+  }
+  if (S.mode === 'sandbox' && c.maxMult >= 2) S.endCard = true;
+}
+function addGold(S, g) { S.gold += g; S.tm.earned += g; }
+
+// ---------- pratinjau runtuhan (tahan blok) ----------
+function computePreview(S, id) {
+  const C = { sim: true, bodies: new Map(), grid: S.grid.slice(), mark: 0 };
+  for (const [k, b] of S.bodies) C.bodies.set(k, Object.assign({}, b));
+  const t = C.bodies.get(id); if (!t) return null;
+  unplace(C, t); C.bodies.delete(id);
+  for (let k = 0; k < 40 && gravityTick(C, { noDamage: true, noWobble: true }); k++);
+  const moved = [];
+  for (const b of S.bodies.values()) { const c = C.bodies.get(b.id); if (c && c.y !== b.y) moved.push(b.id); }
+  return { id, moved };
+}
+
+// ---------- miners ----------
+const dps = (S, lv) => CFG.minerBaseDps * Math.pow(CFG.minerDpsGrowth, lv - 1) * (1 + S.upg.dps * CFG.dpsUpgradeStep);
+function exposed(S, b) {
+  if (b.y + b.h >= ROWS) return true;
+  for (let j = 0; j < b.h; j++) for (let i = 0; i < b.w; i++) {
+    const x = b.x + i, y = b.y + j;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && S.grid[idx(nx, ny)] === 0) return true;
+    }
+  }
+  return false;
+}
+function updateMiners(S, dt) {
+  S.targets.fill(0);
+  let cands;
+  if (S.mark && S.bodies.has(S.mark)) cands = [S.mark];
+  else if (S.mode === 'sandbox') cands = [];
+  else {
+    let list = [...S.bodies.values()].filter(b => b.type !== 'bed' && b.state !== 'fall' && exposed(S, b));
+    if (CFG.minersAvoidProps && list.some(b => b.type !== 'prop')) list = list.filter(b => b.type !== 'prop');
+    list.sort((a, b) => (b.y + b.h) - (a.y + a.h) || Math.abs(a.x + a.w / 2 - 4) - Math.abs(b.x + b.w / 2 - 4) || a.id - b.id);
+    cands = list.map(b => b.id);
+  }
+  if (!cands.length) return;
+  let n = 0;
+  for (let s = 0; s < DECK_SLOTS; s++) {
+    const lv = S.deck[s]; if (!lv) continue;
+    const id = cands[n++ % cands.length]; S.targets[s] = id;
+    const b = S.bodies.get(id); if (!b) continue;
+    b.hp -= dps(S, lv) * dt;
+    if (b.hp <= 0) breakBody(S, b, 'miner');
+  }
+}
+function merge(S, a, b) {
+  if (a === b || !S.deck[a]) return;
+  if (!S.deck[b]) { S.deck[b] = S.deck[a]; S.deck[a] = 0; return; }
+  if (S.deck[a] === S.deck[b] && S.gold >= CFG.mergeCost) {
+    S.gold -= CFG.mergeCost; S.deck[b]++; S.deck[a] = 0; S.tm.merges++;
+    if (S.tm.firstMerge === null) S.tm.firstMerge = S.t;
+    if (S.tut === 0) S.tut = 1;
+    const p = slotPos(b); S.fx.texts.push({ x: p.x + SLOT / 2, y: p.y, txt: 'Lv' + S.deck[b], life: .8, col: '#fff' });
+  } else { const t = S.deck[a]; S.deck[a] = S.deck[b]; S.deck[b] = t; }
+}
+function autoMerge(S) {
+  for (let i = 0; i < DECK_SLOTS; i++) for (let j = i + 1; j < DECK_SLOTS; j++)
+    if (S.deck[i] && S.deck[i] === S.deck[j]) { merge(S, j, i); return; }
+}
+const minerPrice = S => Math.round(CFG.minerCost * Math.pow(CFG.minerCostGrowth, S.buys));
+const upgPrice = (S, k) => k === 'spawn' ? Math.round(CFG.upgSpawnCost * Math.pow(CFG.upgSpawnGrowth, S.upg.spawn - 1))
+  : k === 'dps' ? Math.round(CFG.upgDpsCost * Math.pow(CFG.upgDpsGrowth, S.upg.dps))
+  : Math.round(CFG.upgChainCost * Math.pow(CFG.upgChainGrowth, S.upg.chain));
+function spawnMiner(S) { const s = S.deck.indexOf(0); if (s < 0) return false; S.deck[s] = S.upg.spawn; return true; }
+
+// ---------- langkah simulasi tetap (1/60 s) ----------
+const STEP = 1 / 60;
+function stepSim(S) {
+  if (S.hitstop > 0) { S.hitstop -= STEP * 1000; return; }
+  S.t += STEP;
+  for (const b of S.bodies.values()) if (b.state === 'wobble') b.wob -= STEP * 1000;
+  S.acc += STEP * 1000;
+  while (S.acc >= CFG.fallTickMs) {
+    S.acc -= CFG.fallTickMs;
+    const active = gravityTick(S, {});
+    if (!active && S.cascade) endCascade(S);
+  }
+  updateMiners(S, STEP);
+  if (S.mode !== 'game') return;
+  S.spawnT += STEP;
+  if (S.spawnT >= CFG.spawnInterval) { if (spawnMiner(S)) S.spawnT = 0; else S.spawnT = CFG.spawnInterval; }
+  if (CFG.autoMerge && (S.mergeT += STEP) > 0.5) { S.mergeT = 0; autoMerge(S); }
+  if (S.tut === 0 && S.t > 12) S.tut = 1;
+  if (S.t - S.tm.lastLog >= 1) { S.tm.lastLog = S.t; S.tm.log.push([S.t, S.tm.earned]); if (S.tm.log.length > 200) S.tm.log.shift(); }
+  let left = false; for (const b of S.bodies.values()) if (b.type !== 'bed') { left = true; break; }
+  if (!left && !S.cascade) {
+    if (!S.clearT) S.clearT = 1.5;
+    S.clearT -= STEP;
+    if (S.clearT <= 0) { S.clearT = 0; S.tm.faces++; loadFace(S, S.face + 1); }
+  }
+}
+function goldPerMin(S) {
+  const L = S.tm.log, now = L[L.length - 1];
+  let old = L[0]; for (const e of L) if (now[0] - e[0] <= 60) { old = e; break; }
+  const dtm = (now[0] - old[0]) / 60; return dtm > 0 ? (now[1] - old[1]) / dtm : 0;
+}
+
+// =====================================================================
+// FX
+// =====================================================================
+function dust(S, b, n) {
+  if (S.sim) return;
+  for (let i = 0; i < n && S.fx.dust.length < 400; i++)
+    S.fx.dust.push({ x: WX + (b.x + Math.random() * b.w) * CELL, y: WY + (b.y + b.h) * CELL - 2, vx: (Math.random() - .5) * 80, vy: -Math.random() * 60, life: .6 + Math.random() * .4 });
+}
+function updateFx(S, dt) {
+  const f = S.fx;
+  for (const d of f.dots) {
+    if (!d.belt) { d.vy += 900 * dt; d.x += d.vx * dt; d.y += d.vy * dt; if (d.y >= FLOOR + 3) { d.y = FLOOR + 3; d.belt = true; } }
+    else d.x += 140 * dt;
+  }
+  f.dots = f.dots.filter(d => d.x < W - WX + 8);
+  for (const d of f.dust) { d.vy += 120 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.life -= dt; }
+  f.dust = f.dust.filter(d => d.life > 0);
+  for (const t of f.texts) { t.y -= 30 * dt; t.life -= dt; }
+  f.texts = f.texts.filter(t => t.life > 0);
+  if (S.multPop) { S.multPop.life -= dt * .7; if (S.multPop.life <= 0) S.multPop = null; }
+  S.trauma = Math.max(0, S.trauma - dt * 1.6);
+  for (const b of S.bodies.values()) b.ry += (b.y - b.ry) * Math.min(1, dt * 28);
+}
+
+// =====================================================================
+// RENDER
+// =====================================================================
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let scale = 1, dpr = 1;
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  scale = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = W * scale + 'px'; cv.style.height = H * scale + 'px';
+  cv.width = Math.round(W * scale * dpr); cv.height = Math.round(H * scale * dpr);
+}
+addEventListener('resize', resize); resize();
+
+function fmt(n) {
+  if (n < 1000) return String(Math.floor(n));
+  const u = ['K', 'M', 'B', 'T']; let i = -1;
+  while (n >= 1000 && i < 3) { n /= 1000; i++; }
+  return n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0) + u[i];
+}
+const slotPos = s => ({ x: DECK_X + (s % 6) * 52, y: DECK_Y + Math.floor(s / 6) * 52 });
+function buttons(S) {
+  if (S.endCard) return [
+    { x: 40, y: 360, w: 130, h: 44, label: 'Again', ok: true, act: () => loadSandbox(S, S.sandboxIdx) },
+    { x: 190, y: 360, w: 130, h: 44, label: 'Next layout', ok: true, act: () => loadSandbox(S, S.sandboxIdx + 1) },
+  ];
+  if (S.mode !== 'game') return [];
+  const y = 602, w = 80, h = 34;
+  const mk = (i, label, sub, price, act) => ({ x: 11 + i * 86, y, w, h, label, sub: fmt(price), ok: S.gold >= price, act: () => { if (S.gold >= price) { S.gold -= price; act(); } } });
+  return [
+    mk(0, 'Buy Lv' + S.upg.spawn, '', minerPrice(S), () => { if (spawnMiner(S)) S.buys++; else S.gold += minerPrice(S); }),
+    mk(1, 'Spawn Lv+', '', upgPrice(S, 'spawn'), () => S.upg.spawn++),
+    mk(2, 'DPS +' + Math.round(CFG.dpsUpgradeStep * 100) + '%', '', upgPrice(S, 'dps'), () => S.upg.dps++),
+    mk(3, 'Chain max+', '', upgPrice(S, 'chain'), () => S.upg.chain++),
+  ];
+}
+
+function drawBody(S, b) {
+  const x = WX + b.x * CELL, y = WY + b.ry * CELL, w = b.w * CELL, h = b.h * CELL;
+  const ox = b.state === 'wobble' ? Math.sin(S.t * 90) * 2 : 0;
+  const col = STRATA[Math.floor((S.face - 1) / 10) % STRATA.length];
+  ctx.save(); ctx.translate(ox, 0);
+  if (b.type === 'bed') {
+    ctx.fillStyle = '#26231f'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#4A4A4A'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let k = -h; k < w; k += 7) { ctx.moveTo(x + Math.max(0, k), y + Math.max(0, -k)); ctx.lineTo(x + Math.min(w, k + h), y + Math.min(h, h - (k + h - Math.min(w, k + h)))); }
+    ctx.stroke();
+  } else if (b.type === 'prop') {
+    const cx = x + w / 2;
+    ctx.strokeStyle = WOOD; ctx.lineWidth = 2.5; ctx.beginPath();
+    ctx.moveTo(cx - 5, y + 2); ctx.lineTo(cx - 5, y + h - 2); ctx.moveTo(cx + 5, y + 2); ctx.lineTo(cx + 5, y + h - 2);
+    ctx.moveTo(cx - 10, y + 2); ctx.lineTo(cx + 10, y + 2); ctx.moveTo(cx - 10, y + h - 2); ctx.lineTo(cx + 10, y + h - 2);
+    for (let j = 0; j < b.h; j++) { const yy = y + j * CELL; ctx.moveTo(cx - 5, yy + 6); ctx.lineTo(cx + 5, yy + CELL - 6); ctx.moveTo(cx + 5, yy + 6); ctx.lineTo(cx - 5, yy + CELL - 6); }
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.strokeRect(x + 2.5, y + 2.5, w - 5, h - 5);
+    if (b.type === 'slab') { ctx.lineWidth = 1.5; ctx.strokeRect(x + 6, y + 6, w - 12, h - 12); }
+    if (b.ore) {
+      ctx.fillStyle = GOLD;
+      for (let i = 0; i < b.w; i++) for (const [dx, dy] of [[7, 7], [CELL - 11, 7], [7, CELL - 11], [CELL - 11, CELL - 11]]) ctx.fillRect(x + i * CELL + dx, y + dy, 4, 4);
+    }
+  }
+  if (b.type !== 'bed') {
+    const r = b.hp / b.maxHp;
+    if (r < 0.3) { ctx.strokeStyle = '#e0d5c0'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x + 5, y + 6); ctx.lineTo(x + w * .45, y + h * .55); ctx.lineTo(x + w * .4, y + h - 5); ctx.stroke(); }
+    ctx.fillStyle = b.type === 'prop' ? '#d9b183' : '#bdb3a0'; ctx.font = '10px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(fmt(Math.max(0, b.hp)), b.type === 'prop' ? x + w / 2 + 16 : x + w / 2, y + h / 2);
+  }
+  ctx.restore();
+}
+function drawLoadLines(S) {
+  const blink = 0.5 + 0.5 * Math.sin(S.t * 8);
+  ctx.save(); ctx.setLineDash([3, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = `rgba(255,210,63,${0.35 + 0.5 * blink})`;
+  for (const b of S.bodies.values()) {
+    if (b.type !== 'slab' || b.state !== 'rest') continue;
+    const sup = supports(S, b);
+    if (sup.floor || sup.ids.length !== 1) continue;
+    const p = S.bodies.get(sup.ids[0]); if (p.type !== 'prop') continue;
+    ctx.beginPath(); ctx.moveTo(WX + (b.x + b.w / 2) * CELL, WY + (b.ry + .5) * CELL); ctx.lineTo(WX + (p.x + .5) * CELL, WY + (p.ry + p.h * .5) * CELL); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawMiner(x, y, lv, r) {
+  ctx.fillStyle = '#f2efe8'; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  if (lv >= 5) { ctx.strokeStyle = '#f2efe8'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, r + 3, 0, 7); ctx.stroke(); }
+  ctx.strokeStyle = '#f2efe8'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x - r * .6, y - r - 2); ctx.quadraticCurveTo(x, y - r - 7, x + r * .6, y - r - 2); ctx.stroke(); // siluet beliung
+  ctx.fillStyle = '#14120F'; ctx.font = `bold ${Math.round(r * 1.05)}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(lv, x, y + 1);
+}
+
+function render(S, now) {
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+  ctx.fillStyle = '#14120F'; ctx.fillRect(0, 0, W, H);
+  const sh = S.trauma * S.trauma * 8 * CFG.shake;
+  ctx.save(); ctx.translate((Math.random() - .5) * sh, (Math.random() - .5) * sh);
+  // rangka kayu tepi + lantai
+  ctx.strokeStyle = '#3a2f22'; ctx.lineWidth = 3; ctx.beginPath();
+  for (const xx of [WX - 12, W - WX + 12]) { ctx.moveTo(xx, WY - 4); ctx.lineTo(xx, FLOOR); }
+  for (let yy = WY + 40; yy < FLOOR; yy += 108) { ctx.moveTo(WX - 22, yy); ctx.lineTo(WX - 2, yy); ctx.moveTo(W - WX + 2, yy); ctx.lineTo(W - WX + 22, yy); }
+  ctx.stroke();
+  ctx.strokeStyle = '#5a5046'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(8, FLOOR + 1); ctx.lineTo(W - 8, FLOOR + 1); ctx.moveTo(8, FLOOR + 7); ctx.lineTo(W - 8, FLOOR + 7); ctx.stroke();
+  ctx.strokeStyle = '#6a5d4e'; ctx.strokeRect(W - WX + 8, FLOOR - 10, 22, 20); // grinder
+  // pratinjau
+  if (S.preview) {
+    ctx.fillStyle = 'rgba(255,210,63,.18)'; ctx.strokeStyle = 'rgba(255,210,63,.7)'; ctx.lineWidth = 1;
+    for (const id of S.preview.moved) { const b = S.bodies.get(id); if (b) { ctx.fillRect(WX + b.x * CELL, WY + b.y * CELL, b.w * CELL, b.h * CELL); ctx.strokeRect(WX + b.x * CELL + .5, WY + b.y * CELL + .5, b.w * CELL - 1, b.h * CELL - 1); } }
+  }
+  for (const b of S.bodies.values()) drawBody(S, b);
+  drawLoadLines(S);
+  // marker Cave-in Cascade
+  const mb = S.bodies.get(S.mark);
+  if (mb) {
+    const x = WX + (mb.x + mb.w / 2) * CELL, y = WY + mb.ry * CELL - 4 + Math.sin(S.t * 6) * 2;
+    ctx.fillStyle = MARK; ctx.beginPath(); ctx.moveTo(x - 8, y - 12); ctx.lineTo(x + 8, y - 12); ctx.lineTo(x, y); ctx.fill();
+    ctx.strokeStyle = MARK; ctx.lineWidth = 2; ctx.strokeRect(WX + mb.x * CELL + 1, WY + mb.ry * CELL + 1, mb.w * CELL - 2, mb.h * CELL - 2);
+  }
+  // miner di dinding (avatar dek)
+  for (let s = 0; s < DECK_SLOTS; s++) {
+    const b = S.bodies.get(S.targets[s]); if (!b || !S.deck[s]) continue;
+    const hit = Math.sin(S.t * 18 + s * 1.7);
+    const x = WX + (b.x + b.w / 2) * CELL + ((s * 7) % 21 - 10), y = WY + (b.ry + b.h) * CELL - 8 - Math.max(0, hit) * 3;
+    drawMiner(x, y, S.deck[s], 6);
+  }
+  // fx
+  ctx.fillStyle = 'rgba(217,203,176,.5)'; for (const d of S.fx.dust) ctx.fillRect(d.x, d.y, 2, 2);
+  ctx.fillStyle = GOLD; for (const d of S.fx.dots) ctx.fillRect(d.x - 1.5, d.y - 1.5, 3, 3);
+  ctx.restore();
+  for (const t of S.fx.texts) { ctx.globalAlpha = Math.min(1, t.life * 2); ctx.fillStyle = t.col; ctx.font = `bold ${t.size || 11}px system-ui`; ctx.textAlign = 'center'; ctx.fillText(t.txt, t.x, t.y); }
+  ctx.globalAlpha = 1;
+  // HUD
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = GOLD; ctx.font = 'bold 18px system-ui'; ctx.fillText(S.mode === 'sandbox' ? 'PULL THE PROP' : 'Gold ' + fmt(S.gold), 10, 22);
+  ctx.fillStyle = '#9a917f'; ctx.font = '11px system-ui';
+  ctx.fillText(S.mode === 'sandbox' ? 'Sandbox: ' + SANDBOX[S.sandboxIdx].name + '  (tap = cabut)' : `Face ${S.face} · Stratum ${Math.floor((S.face - 1) / 10) + 1} · chain max x${chainMax(S)}`, 10, 38);
+  if (S.multPop) {
+    const k = 1 + 0.35 * Math.max(0, S.multPop.life - .6) * 2.5;
+    ctx.save(); ctx.translate(W / 2, WY + 70); ctx.scale(k, k);
+    ctx.fillStyle = MARK; ctx.font = 'bold 44px system-ui'; ctx.textAlign = 'center'; ctx.globalAlpha = Math.min(1, S.multPop.life + .3);
+    ctx.fillText('x' + S.multPop.v, 0, 0); ctx.restore(); ctx.globalAlpha = 1;
+  }
+  // dek
+  if (S.mode === 'game') {
+    ctx.fillStyle = '#3a342c'; ctx.fillRect(DECK_X, DECK_Y - 6, 310 * Math.min(1, S.spawnT / CFG.spawnInterval), 3);
+    for (let s = 0; s < DECK_SLOTS; s++) {
+      const p = slotPos(s); ctx.strokeStyle = '#3a342c'; ctx.lineWidth = 1; ctx.strokeRect(p.x + .5, p.y + .5, SLOT - 1, SLOT - 1);
+      if (S.deck[s] && !(drag && drag.from === s)) drawMiner(p.x + SLOT / 2, p.y + SLOT / 2 + 3, S.deck[s], 13);
+    }
+    if (drag) drawMiner(drag.x, drag.y, S.deck[drag.from], 15);
+  }
+  for (const b of buttons(S)) {
+    if (S.endCard) { ctx.fillStyle = 'rgba(0,0,0,.6)'; }
+    ctx.fillStyle = b.ok ? '#3b3224' : '#221f1b'; ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = b.ok ? GOLD : '#444'; ctx.strokeRect(b.x + .5, b.y + .5, b.w - 1, b.h - 1);
+    ctx.fillStyle = b.ok ? '#eee' : '#777'; ctx.textAlign = 'center'; ctx.font = 'bold 11px system-ui';
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + (b.sub ? 15 : 27)); if (b.sub) { ctx.font = '10px system-ui'; ctx.fillStyle = b.ok ? GOLD : '#666'; ctx.fillText(b.sub, b.x + b.w / 2, b.y + 28); }
+  }
+  if (S.endCard) {
+    ctx.fillStyle = 'rgba(10,9,8,.55)'; ctx.fillRect(0, 250, W, 170);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center'; ctx.fillText('Which one would you pull?', W / 2, 300);
+    ctx.font = '12px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText('Largest chain x' + S.tm.largest, W / 2, 330);
+    for (const b of buttons(S)) { ctx.fillStyle = '#3b3224'; ctx.fillRect(b.x, b.y, b.w, b.h); ctx.strokeStyle = GOLD; ctx.strokeRect(b.x + .5, b.y + .5, b.w - 1, b.h - 1); ctx.fillStyle = '#eee'; ctx.font = 'bold 13px system-ui'; ctx.fillText(b.label, b.x + b.w / 2, b.y + 27); }
+  }
+  // tutorial
+  const pulse = 0.5 + 0.5 * Math.sin(now / 160);
+  if (S.mode === 'game' && S.face === 1 && S.tut < 2) {
+    let tx, ty, msg;
+    if (S.tut === 0) { const a = S.deck.findIndex(v => v === 1), b = S.deck.findIndex((v, i) => v === 1 && i !== a); if (a >= 0 && b >= 0) { const p = slotPos(b); tx = p.x + SLOT / 2; ty = p.y + SLOT / 2; msg = 'Drag 1 onto 1'; } }
+    else { const p = [...S.bodies.values()].find(b => b.type === 'prop'); if (p && S.mark !== p.id) { tx = WX + (p.x + .5) * CELL; ty = WY + (p.ry + p.h / 2) * CELL; msg = 'Tap the prop'; } else if (S.mark) msg = 'Miners focus the prop...'; }
+    if (msg) {
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 15px system-ui'; ctx.textAlign = 'center'; ctx.fillText(msg, W / 2, WY + 30);
+      if (tx !== undefined) { ctx.strokeStyle = `rgba(255,255,255,${.4 + .6 * pulse})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(tx, ty, 14 + pulse * 8, 0, 7); ctx.stroke(); }
+    }
+  }
+  if (S.clearT > 0) { ctx.fillStyle = MARK; ctx.font = 'bold 26px system-ui'; ctx.textAlign = 'center'; ctx.fillText('FACE CLEARED', W / 2, WY + 200); }
+}
+
+// =====================================================================
+// INPUT (pointer events: mouse + touch)
+// =====================================================================
+let G, drag = null, press = null, holdTimer = 0;
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H }; }
+function slotAt(p) { for (let s = 0; s < DECK_SLOTS; s++) { const q = slotPos(s); if (p.x >= q.x && p.x < q.x + SLOT && p.y >= q.y && p.y < q.y + SLOT) return s; } return -1; }
+function bodyAt(p) {
+  const x = Math.floor((p.x - WX) / CELL), y = Math.floor((p.y - WY) / CELL);
+  if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return null;
+  return G.bodies.get(G.grid[idx(x, y)]) || null;
+}
+function tapBlock(b) {
+  G.tm.taps++;
+  if (G.mode === 'sandbox' && CFG.sandboxInstantBreak) { breakBody(G, b, 'pull'); return; }
+  G.mark = G.mark === b.id ? 0 : b.id;
+  if (G.mark && b.type === 'prop' && G.tut === 1) G.fx.texts.push({ x: W / 2, y: WY + 52, txt: 'Cave-in Cascade!', life: 1.2, col: MARK, size: 14 });
+}
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('pointerdown', e => {
+  const p = pos(e); cv.setPointerCapture(e.pointerId);
+  for (const b of buttons(G)) if (p.x >= b.x && p.x < b.x + b.w && p.y >= b.y && p.y < b.y + b.h) { b.act(); return; }
+  if (G.endCard) return;
+  const s = slotAt(p);
+  if (G.mode === 'game' && s >= 0 && G.deck[s]) { drag = { from: s, x: p.x, y: p.y }; return; }
+  const b = bodyAt(p);
+  if (b && b.type !== 'bed') {
+    press = { id: b.id, held: false };
+    holdTimer = setTimeout(() => { if (press) { press.held = true; G.preview = computePreview(G, press.id); } }, CFG.holdMs);
+  }
+});
+cv.addEventListener('pointermove', e => { if (drag) { const p = pos(e); drag.x = p.x; drag.y = p.y; } });
+function endPointer(e, cancel) {
+  if (drag) { const s = slotAt(pos(e)); if (!cancel && s >= 0) merge(G, drag.from, s); drag = null; }
+  if (press) {
+    clearTimeout(holdTimer);
+    const b = G.bodies.get(press.id);
+    if (press.held) G.preview = null; else if (!cancel && b) tapBlock(b);
+    press = null;
+  }
+}
+cv.addEventListener('pointerup', e => endPointer(e, false));
+cv.addEventListener('pointercancel', e => endPointer(e, true));
+
+// =====================================================================
+// MODE, PANELS
+// =====================================================================
+function startGame() {
+  G = newState('game'); loadFace(G, 1); G.deck[0] = 1; G.deck[1] = 1;
+  document.getElementById('bMode').textContent = 'Pull the Prop';
+}
+function startSandbox() {
+  G = newState('sandbox'); loadSandbox(G, 0);
+  for (let s = 0; s < 6; s++) G.deck[s] = 5;
+  document.getElementById('bMode').textContent = 'Back to game';
+}
+document.getElementById('bMode').onclick = () => G.mode === 'game' ? startSandbox() : startGame();
+function togglePanel(id, btn) {
+  const el = document.getElementById(id), show = el.style.display !== 'block';
+  for (const p of document.querySelectorAll('.panel')) p.style.display = 'none';
+  for (const b of document.querySelectorAll('#bar button')) b.classList.remove('on');
+  if (show) { el.style.display = 'block'; btn.classList.add('on'); }
+}
+document.getElementById('bTune').onclick = e => togglePanel('tune', e.target);
+document.getElementById('bStats').onclick = e => togglePanel('stats', e.target);
+(function buildTune() {
+  const el = document.getElementById('tune');
+  let h = '<div style="display:flex;gap:4px;flex-wrap:wrap"><button id="tRestart">Restart session</button><button id="tOffline">Fake offline 1h</button><button id="tReset">Reset defaults</button></div>';
+  for (const [g, keys] of Object.entries(GROUPS)) {
+    h += `<h4>${g}</h4>`;
+    for (const k of keys) h += typeof CFG_DEFAULT[k] === 'boolean'
+      ? `<label>${k}<input type="checkbox" data-k="${k}" ${CFG[k] ? 'checked' : ''}></label>`
+      : `<label>${k}<input type="number" step="any" data-k="${k}" value="${CFG[k]}"></label>`;
+  }
+  h += '<p style="color:#888">HP/bobot berlaku untuk Face berikutnya atau setelah Restart.</p>';
+  el.innerHTML = h;
+  el.addEventListener('input', e => {
+    const k = e.target.dataset.k; if (!k) return;
+    if (e.target.type === 'checkbox') CFG[k] = e.target.checked;
+    else { const v = parseFloat(e.target.value); if (Number.isFinite(v)) CFG[k] = v; }
+    saveCfg();
+  });
+  document.getElementById('tRestart').onclick = () => G.mode === 'game' ? startGame() : startSandbox();
+  document.getElementById('tReset').onclick = () => { CFG = Object.assign({}, CFG_DEFAULT); saveCfg(); buildTune(); };
+  document.getElementById('tOffline').onclick = () => {
+    if (G.mode !== 'game') return;
+    let gpm = goldPerMin(G);
+    if (gpm <= 0) gpm = G.deck.reduce((a, lv) => a + (lv ? dps(G, lv) : 0), 0) * CFG.goldPerHp * 60;
+    const g = gpm * 60 * CFG.offlineRatio; addGold(G, g);
+    G.fx.texts.push({ x: W / 2, y: WY + 120, txt: 'Offline 1h: +' + fmt(g), life: 2.5, col: GOLD, size: 16 });
+  };
+})();
+let botOut = '';
+function updateStats() {
+  const el = document.getElementById('stats'); if (el.style.display !== 'block') return;
+  const t = G.tm, s = v => v === null ? '–' : v.toFixed(1) + ' s';
+  const rows = [
+    ['Mode', G.mode], ['Session time', G.t.toFixed(0) + ' s'], ['Time to first merge', s(t.firstMerge)],
+    ['Time to first cascade', s(t.firstCascade)], ['Time to first big (x5+)', s(t.firstBig)],
+    ['Largest chain', 'x' + t.largest], ['Cascades', t.cascades], ['Merges', t.merges], ['Taps (Cascade marks)', t.taps],
+    ['Gold/min (last 60 s)', fmt(goldPerMin(G))], ['Gold earned', fmt(t.earned)], ['Faces cleared', t.faces],
+    ['Miners (sum DPS)', fmt(G.deck.reduce((a, lv) => a + (lv ? dps(G, lv) : 0), 0))],
+  ];
+  el.innerHTML = rows.map(r => `<div><span>${r[0]}</span><b>${r[1]}</b></div>`).join('') +
+    '<div style="margin-top:6px"><button id="sCopy">Copy JSON</button> <button id="sBot">Bot 5 min: Cascade vs none</button></div>' +
+    `<div id="botOut" style="white-space:pre-wrap;color:#aaa;margin-top:4px">${botOut}</div>`;
+  document.getElementById('sBot').onclick = () => {
+    const a = simBot(300, true), b = simBot(300, false);
+    botOut = `Dengan Cascade: earned ${fmt(a.earned)}, face ${JSON.stringify(a.faceAt)}, first big ${a.firstBig === null ? '–' : a.firstBig.toFixed(1) + 's'}\n` +
+      `Tanpa Cascade: earned ${fmt(b.earned)}, face ${JSON.stringify(b.faceAt)}, first big ${b.firstBig === null ? '–' : b.firstBig.toFixed(1) + 's'}\n` +
+      `Income tanpa/dengan = ${Math.round(b.earned / a.earned * 100)}% (A3: target >= 60%)`;
+  };
+  document.getElementById('sCopy').onclick = () => {
+    const j = JSON.stringify(Object.assign({ mode: G.mode, t: G.t, face: G.face, gpm: goldPerMin(G) }, t, { log: undefined }));
+    console.log(j); navigator.clipboard && navigator.clipboard.writeText(j).catch(() => {});
+  };
+}
+
+// =====================================================================
+// SELF-TEST (?test): determinisme + Face 1 cascade mencapai x5+
+// =====================================================================
+function selfTest() {
+  const run = () => {
+    const S = newState('sandbox'); loadFace(S, 1);
+    const prop = [...S.bodies.values()].find(b => b.type === 'prop');
+    breakBody(S, prop, 'pull');
+    for (let i = 0; i < 60 * 10; i++) stepSim(S);
+    return { gold: Math.round(S.gold), largest: S.tm.largest, left: S.bodies.size };
+  };
+  const a = run(), b = run();
+  console.assert(JSON.stringify(a) === JSON.stringify(b), 'non-deterministic', a, b);
+  console.assert(a.largest >= 5, 'Face 1 cascade < x5', a);
+  console.log('selfTest', a, JSON.stringify(a) === JSON.stringify(b) && a.largest >= 5 ? 'PASS' : 'FAIL');
+  return a;
+}
+if (location.search.includes('test')) selfTest();
+
+// Bot headless untuk tuning pacing: greedy merge/beli/upgrade, opsional tandai Prop penahan tunggal.
+// Membandingkan income dengan vs tanpa Cascade (asumsi A3 di konsep).
+function simBot(secs, useCascade) {
+  const S = newState('game'); loadFace(S, 1); S.deck[0] = 1; S.deck[1] = 1;
+  const faceAt = {};
+  for (let i = 0; i < secs * 60; i++) {
+    stepSim(S);
+    if (i % 30) continue;
+    autoMerge(S);
+    if (S.deck.includes(0) && S.gold >= minerPrice(S)) { S.gold -= minerPrice(S); spawnMiner(S); S.buys++; }
+    for (const k of ['dps', 'spawn', 'chain']) { const p = upgPrice(S, k); if (S.gold >= p * 2) { S.gold -= p; S.upg[k]++; } }
+    if (useCascade && !S.mark) for (const b of S.bodies.values()) {
+      if (b.type !== 'slab' || b.state !== 'rest') continue;
+      const sp = supports(S, b);
+      if (!sp.floor && sp.ids.length === 1 && S.bodies.get(sp.ids[0]).type === 'prop') { S.mark = sp.ids[0]; S.tm.taps++; break; }
+    }
+    if (i % 3600 === 0) faceAt[Math.round(S.t / 60) + 'm'] = S.face;
+  }
+  faceAt[secs / 60 + 'm'] = S.face;
+  return { cascade: useCascade, earned: Math.round(S.tm.earned), faceAt, firstCascade: S.tm.firstCascade, firstBig: S.tm.firstBig, largest: S.tm.largest, cascades: S.tm.cascades };
+}
+
+// =====================================================================
+// LOOP
+// =====================================================================
+startGame();
+let last = performance.now(), simAcc = 0, statT = 0;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  simAcc += dt * Math.max(0, CFG.timeScale);
+  let n = 0; while (simAcc >= STEP && n++ < 240) { stepSim(G); simAcc -= STEP; }
+  updateFx(G, dt);
+  render(G, now);
+  if ((statT += dt) > 0.25) { statT = 0; updateStats(); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Lemonade Apocalypse greybox</title>
+<style>
+  html,body{margin:0;height:100%;background:#151813;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#e8e4d8}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;touch-action:none;background:#23271f}
+  #btnPanel{position:fixed;top:6px;right:6px;z-index:5;width:34px;height:34px;border-radius:8px;border:1px solid #556;background:#2b3029;color:#e8e4d8;font-size:18px;cursor:pointer}
+  #panel{position:fixed;top:0;right:0;bottom:0;width:min(390px,100vw);z-index:4;background:rgba(20,22,18,.96);overflow:auto;padding:46px 12px 20px;box-sizing:border-box;font-size:12px;display:none}
+  #panel h3{margin:14px 0 6px;font-size:13px;color:#ffd23f}
+  #panel button{background:#323a30;color:#e8e4d8;border:1px solid #556;border-radius:6px;padding:5px 8px;margin:2px;font-size:12px;cursor:pointer}
+  #panel button.on{background:#ffd23f;color:#222}
+  #panel label{display:flex;justify-content:space-between;align-items:center;gap:6px;margin:2px 0}
+  #panel input[type=number]{width:80px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;padding:2px 4px}
+  #panel input[type=text],#panel textarea{width:100%;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font:11px monospace;box-sizing:border-box}
+  #panel pre{white-space:pre-wrap;font:11px/1.35 monospace;background:#1b1e19;padding:6px;border-radius:6px;margin:4px 0}
+  #panel table{border-collapse:collapse;font:11px monospace;width:100%}
+  #panel td,#panel th{border:1px solid #333;padding:2px 4px;text-align:right}
+  #panel th:first-child,#panel td:first-child{text-align:left}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<button id="btnPanel" title="Tuning + telemetry (T)">&#9881;</button>
+<div id="panel"></div>
+<script>
+'use strict';
+// ===== CONFIG: every tunable lives here (concept 03_konsep-gd §15.2 + PM locks + greybox additions) =====
+const CONFIG = {
+  // Labour source. true = Cured = Hired (the Unique). false = baseline "Eatventure-style" paid hiring, for comparison.
+  curedHired: true,
+  spawnIntervalBase: 5.0, /* concept 4.0 */ spawnIntervalMin: 1.2, signboardFactor: 0.9,
+  queueMax: 8,
+  counterSpots: 4,          // greybox: customers ordering at the counter at once (concept implies >1, no number given)
+  drinkTime: 1.0, cureTime: 0.6, apronTime: 0.5,
+  zombieSpeed: 40,          // concept 30; 30 makes the queue->counter walk ~7 s, see README
+  humanSpeed: 70, staffSpeed: 90, reserveRunMult: 1.6,
+  recoverStart: 0.6, recoverDuration: 30,
+  takeOrderTime: 0.3, deliverTime: 0.2, playerServeTime: 0.8,
+  rushFactor: 0.7, rushDuration: 3, rushCooldown: 5,
+  campPerApron: 2,
+  apronCosts: [15, 40, 100, 200, 600, 1500, 4000, 10000], // concept [25,80,200,450,1000,2500,6000,15000]
+  apronCaps:  [2, 3, 4, 5, 6, 8, 10, 12],
+  paidFirstHire: 10,        // baseline only: price of staff #1 (Cured = Hired gets staff #1 free from the first cure)
+  stations: [
+    { id: 'Lemonade',      basePrice: 5,  baseTime: 3.0, baseCost: 10,  unlockCost: 0,    color: '#FFD23F' },
+    { id: 'Iced Lemonade', basePrice: 12, baseTime: 4.0, baseCost: 60,  unlockCost: 150,  color: '#9FD8EF' },
+    { id: 'Pink Lemonade', basePrice: 30, baseTime: 5.0, baseCost: 400, unlockCost: 1500, color: '#FF9FBF' },
+  ],
+  pricePerLevel: 0.2, costGrowth: 1.2, milestones: [10, 25, 50, 75], // costGrowth: concept 1.13 (income ~4x too fast, see README)
+  milestoneTimeFactor: 0.85, maxLevel: 75,
+  signboardBaseCost: 50, signboardGrowth: 2.2, signboardMax: 12,
+  offlineRate: 0.5, offlineCapMin: 120,
+  newestStationWeight: 0.4,
+  // PM lock 1 (02_analisis-pm §2.2): cure drives the economy. Zombies can only order Lemonade;
+  // a cured human who is NOT hired re-queues and orders the full menu at full price.
+  zombieOnlyLemonade: true, zombiePayFactor: 1.0,
+  humanReorder: true, humanTwoDrinkChance: 0.3,
+  // Fake rewarded "Lemon Rush"
+  rushProfitMult: 2, rushProfitDuration: 180, rushProfitStackMax: 1800,
+  seed: 7,
+};
+
+// ===== helpers =====
+const W = 390, H = 844;
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const lerp = (a, b, k) => a + (b - a) * k;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function hexLerp(a, b, k) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const r = Math.round(lerp(pa >> 16, pb >> 16, k)), g = Math.round(lerp(pa >> 8 & 255, pb >> 8 & 255, k)), bl = Math.round(lerp(pa & 255, pb & 255, k));
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
+}
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : Math.floor(n).toString();
+const mmss = s => s == null ? '–' : Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+
+// ===== layout (logical 390 x 844) =====
+const SPAWN = { x: -20, y: 100 }, EXIT = { x: 410, y: 100 };
+const queueSlot = i => ({ x: 330 - 36 * i, y: 142 });
+const spotPos = k => ({ x: 330 - 70 * k, y: 204 });
+const behindCounter = k => ({ x: 330 - 70 * k, y: 244 });
+const STATION_X = [80, 195, 310], STATION_Y = 318;
+const RACK = { x: 20, y: 500, w: 170, h: 100 }, RACK_PICK = { x: 105, y: 590 };
+const CAMP = { x: 205, y: 500, w: 165, h: 100 };
+const campPos = i => ({ x: 222 + (i % 9) * 17, y: 572 + Math.floor(i / 9) * 12 });
+const BTN_Y0 = 700, BTN_H = 66;
+const BUTTONS = [ // logical rects; ids resolved in uiButtons()
+  { id: 'st0', x: 6, y: BTN_Y0, w: 122, h: BTN_H }, { id: 'st1', x: 134, y: BTN_Y0, w: 122, h: BTN_H }, { id: 'st2', x: 262, y: BTN_Y0, w: 122, h: BTN_H },
+  { id: 'rack', x: 6, y: BTN_Y0 + 72, w: 122, h: BTN_H }, { id: 'sign', x: 134, y: BTN_Y0 + 72, w: 122, h: BTN_H }, { id: 'rush', x: 262, y: BTN_Y0 + 72, w: 122, h: BTN_H },
+];
+
+// ===== economy formulas (concept §5) =====
+const milestonesHit = (cfg, L) => cfg.milestones.filter(m => L >= m).length;
+const stPrice = (cfg, st) => st.def.basePrice * (1 + cfg.pricePerLevel * (st.level - 1)) * Math.pow(2, milestonesHit(cfg, st.level));
+const stTime = (cfg, st) => st.def.baseTime * Math.pow(cfg.milestoneTimeFactor, milestonesHit(cfg, st.level));
+const stUpCost = (cfg, st) => st.def.baseCost * Math.pow(cfg.costGrowth, st.level - 1);
+const stSlots = st => 1 + Math.floor(st.level / 25);
+const spawnInterval = S => Math.max(S.cfg.spawnIntervalMin, S.cfg.spawnIntervalBase * Math.pow(S.cfg.signboardFactor, S.signboard));
+const signCost = S => S.cfg.signboardBaseCost * Math.pow(S.cfg.signboardGrowth, S.signboard);
+const apronCap = S => S.apronLvl === 0 ? 1 : S.cfg.apronCaps[S.apronLvl - 1];
+const campCap = S => S.cfg.campPerApron * apronCap(S);
+// Baseline price per hire = same coins per labour slot as the Apron Rack table (isolates the labour SOURCE, not the price).
+function paidHireCosts(cfg) {
+  const out = [cfg.paidFirstHire]; let cap = 1;
+  cfg.apronCaps.forEach((c, i) => { const per = cfg.apronCosts[i] / (c - cap); for (; cap < c; cap++) out.push(Math.round(per)); });
+  return out; // index = current staff count
+}
+function rackCost(S) {
+  if (S.cfg.curedHired) return S.apronLvl < S.cfg.apronCosts.length ? S.cfg.apronCosts[S.apronLvl] : null;
+  const pc = paidHireCosts(S.cfg); return S.staff.length < pc.length ? pc[S.staff.length] : null;
+}
+const labourCount = S => S.staff.length + S.pendingHire;
+const freeSlot = S => S.cfg.curedHired && labourCount(S) < apronCap(S);
+
+// ===== game state =====
+function newGame(cfg, seed) {
+  const S = {
+    cfg, t: 0, coins: 0, earnedTotal: 0, cured: 0, rng: mulberry32(seed ?? cfg.seed), nextId: 1,
+    customers: [], staff: [], queue: [], spots: Array(cfg.counterSpots).fill(null), orders: [],
+    stations: cfg.stations.map((d, i) => ({ def: d, level: i === 0 ? 1 : 0, busy: 0, rushT: 0, rushCd: 0, flash: 0 })),
+    signboard: 0, apronLvl: 0, camp: [], pendingHire: 0,
+    spawnT: 0.6, firstSpawned: false,
+    player: { o: null, t: 0 }, playerServes: 0, rushUsed: 0,
+    rushProfitT: 0, earnBins: [], goals: Array(10).fill(null), fx: [], campFullT: 0, popup: null,
+    tele: { staffAt: {}, queueFullSec: [], minutes: [], curedBins: [] },
+    ftue: { done: {}, shownAt: {}, mark: {} },
+  };
+  return S;
+}
+
+// ===== actions (shared by player input and bot) =====
+function canBuy(S, id) { const c = costOf(S, id); return c != null && S.coins >= c; }
+function costOf(S, id) {
+  if (id.startsWith('st')) { const st = S.stations[+id[2]]; if (!st) return null; if (st.level === 0) return st.def.unlockCost; return st.level >= S.cfg.maxLevel ? null : stUpCost(S.cfg, st); }
+  if (id === 'rack') return rackCost(S);
+  if (id === 'sign') return S.signboard >= S.cfg.signboardMax ? null : signCost(S);
+  return null;
+}
+function buy(S, id) {
+  if (!canBuy(S, id)) return false;
+  const c = costOf(S, id); S.coins -= c;
+  if (id.startsWith('st')) {
+    const st = S.stations[+id[2]], before = milestonesHit(S.cfg, st.level);
+    st.level = st.level === 0 ? 1 : st.level + 1;
+    if (milestonesHit(S.cfg, st.level) > before) { st.flash = 1; addText(S, STATION_X[+id[2]], STATION_Y - 50, 'PRICE x2!', '#FFD23F'); }
+  } else if (id === 'rack') {
+    if (S.cfg.curedHired) { S.apronLvl++; fillFromCamp(S); }
+    else addStaff(S, -20, 400, false); // baseline: hired with coins, walks in fully trained
+  } else if (id === 'sign') S.signboard++;
+  return true;
+}
+function useRush(S) { // fake rewarded: no ad, instant reward
+  S.rushProfitT = Math.min(S.cfg.rushProfitStackMax, S.rushProfitT + S.cfg.rushProfitDuration); S.rushUsed++;
+}
+function playerServe(S, cust) {
+  if (S.player.o) return false;
+  const o = S.orders.find(o => o.state === 'open' && (!cust || o.cust === cust));
+  if (!o) return false;
+  o.state = 'taken'; S.player.o = o; S.player.t = S.cfg.playerServeTime; S.playerServes++;
+  return true;
+}
+function rushStation(S, i) { const st = S.stations[i]; if (st.level > 0 && st.rushCd <= 0) { st.rushT = S.cfg.rushDuration; st.rushCd = S.cfg.rushCooldown + S.cfg.rushDuration; } }
+function skipOffline(S, minutes) {
+  const cpm = avgCpm(S, 5), m = Math.min(minutes, S.cfg.offlineCapMin);
+  const coins = S.cfg.offlineRate * cpm * m;
+  const curedRate = S.tele.curedBins.slice(-300).reduce((a, b) => a + (b || 0), 0) / 5; // cured per min, last 5 min
+  S.popup = { coins, cured: Math.round(S.cfg.offlineRate * curedRate * m), minutes: m };
+}
+function collectOffline(S, mult) { const p = S.popup; if (!p) return; earn(S, p.coins * mult, true); S.cured += p.cured; S.popup = null; }
+
+// ===== simulation =====
+function addText(S, x, y, text, col) { S.fx.push({ type: 'text', x, y, text, col, life: 1.2 }); }
+function earn(S, amt, raw) {
+  const v = raw ? amt : amt * (S.rushProfitT > 0 ? S.cfg.rushProfitMult : 1);
+  S.coins += v; S.earnedTotal += v; const b = Math.floor(S.t); S.earnBins[b] = (S.earnBins[b] || 0) + v; return v;
+}
+function cpmNow(S) { const b = Math.floor(S.t); let s = 0; for (let i = Math.max(0, b - 59); i <= b; i++) s += S.earnBins[i] || 0; return s * 60 / Math.min(60, Math.max(1, S.t)); }
+function avgCpm(S, mins) { const b = Math.floor(S.t), n = Math.min(mins * 60, Math.max(1, b)); let s = 0; for (let i = b - n; i < b; i++) s += S.earnBins[i] || 0; return s * 60 / n; }
+function pickItem(S) {
+  const un = S.stations.map((s, i) => s.level > 0 ? i : -1).filter(i => i >= 0);
+  if (un.length === 1) return un[0];
+  const newest = un[un.length - 1];
+  if (S.rng() < S.cfg.newestStationWeight) return newest;
+  const rest = un.slice(0, -1); return rest[Math.floor(S.rng() * rest.length)];
+}
+function spawnZombie(S, x, y) {
+  const c = { id: S.nextId++, kind: 'zombie', state: 'queue', x: x ?? SPAWN.x, y: y ?? SPAWN.y, face: 1, pending: 0, items: [], cureK: 0, pop: 0, walk: 0, t: 0 };
+  S.customers.push(c); S.queue.push(c);
+}
+function addStaff(S, x, y, recovering) {
+  const s = { id: S.nextId++, state: 'idle', x, y, face: 1, age: recovering ? 0 : 1e9, o: null, t: 0, walk: 0, pop: 0.3, st: -1 };
+  S.staff.push(s);
+  const n = S.staff.length; if (S.tele.staffAt[n] == null) S.tele.staffAt[n] = S.t;
+  return s;
+}
+function moveTo(e, p, speed, dt) {
+  const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy);
+  if (d < 1) { e.x = p.x; e.y = p.y; return true; }
+  const s = Math.min(d, speed * dt); e.x += dx / d * s; e.y += dy / d * s; e.walk += s; if (Math.abs(dx) > 0.5) e.face = dx > 0 ? 1 : -1;
+  return s >= d;
+}
+function leaveSpot(S, c) { if (c.spot != null) { S.spots[c.spot] = null; c.spot = null; } }
+function fillFromCamp(S) {
+  while (S.camp.length && freeSlot(S)) { const r = S.camp.shift(); r.state = 'toRack'; r.run = true; S.pendingHire++; }
+}
+function routeAfterServe(S, c) { // a human finished as a paying customer
+  if (S.cfg.curedHired && S.camp.length < campCap(S)) { c.state = 'toCamp'; S.camp.push(c); }
+  else { c.state = 'leave'; if (S.cfg.curedHired && S.campFullT <= 0) { addText(S, c.x, c.y - 40, 'Camp full', '#aaa'); S.campFullT = 3; } }
+}
+function routeCured(S, c) {
+  if (freeSlot(S)) { c.state = 'toRack'; S.pendingHire++; return; }
+  if (S.cfg.humanReorder && S.queue.length < S.cfg.queueMax) { c.state = 'queue'; c.requeue = true; S.queue.push(c); return; }
+  routeAfterServe(S, c);
+}
+function placeOrder(S, c) {
+  const n = c.kind === 'zombie' ? 1 : (S.rng() < S.cfg.humanTwoDrinkChance ? 2 : 1);
+  c.items = []; for (let i = 0; i < n; i++) {
+    const item = c.kind === 'zombie' && S.cfg.zombieOnlyLemonade ? 0 : pickItem(S);
+    c.items.push(item); S.orders.push({ id: S.nextId++, cust: c, item, state: 'open', t: S.t });
+  }
+  c.pending = n; c.state = 'wait';
+}
+function pay(S, c) {
+  let sum = 0; c.items.forEach(i => sum += stPrice(S.cfg, S.stations[i]));
+  if (c.kind === 'zombie') sum *= S.cfg.zombiePayFactor;
+  const v = earn(S, sum); addText(S, c.x, c.y - 44, '+' + fmt(v), '#FFD23F');
+}
+function deliver(S, o) {
+  o.cust.pending--; S.orders.splice(S.orders.indexOf(o), 1);
+}
+function stepCustomer(S, c, dt) {
+  const cfg = S.cfg, sp = c.kind === 'zombie' ? cfg.zombieSpeed : cfg.humanSpeed;
+  if (c.pop > 0) c.pop -= dt;
+  switch (c.state) {
+    case 'queue': {
+      const i = S.queue.indexOf(c); c.arrived = moveTo(c, queueSlot(i), sp, dt);
+      if (i === 0 && c.arrived) { const k = S.spots.indexOf(null); if (k >= 0) { S.queue.shift(); S.spots[k] = c; c.spot = k; c.state = 'toSpot'; } }
+      break;
+    }
+    case 'toSpot': if (moveTo(c, spotPos(c.spot), sp, dt)) { c.face = 1; placeOrder(S, c); } break;
+    case 'wait': if (c.pending <= 0) { c.state = 'drink'; c.t = cfg.drinkTime; } break;
+    case 'drink': c.t -= dt; if (c.t <= 0) {
+      if (c.kind === 'zombie') { c.state = 'cure'; c.t = cfg.cureTime; }
+      else { pay(S, c); leaveSpot(S, c); routeAfterServe(S, c); }
+    } break;
+    case 'cure': c.t -= dt; c.cureK = clamp(1 - c.t / cfg.cureTime, 0, 1);
+      if (c.t <= 0) {
+        c.kind = 'human'; c.cureK = 1; c.pop = 0.25; S.cured++;
+        const b = Math.floor(S.t); S.tele.curedBins[b] = (S.tele.curedBins[b] || 0) + 1;
+        for (let i = 0; i < 10; i++) { const a = S.rng() * Math.PI * 2, v = 40 + S.rng() * 60; S.fx.push({ type: 'dot', x: c.x, y: c.y - 20, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 30, life: 0.6, col: '#FFD23F' }); }
+        pay(S, c); leaveSpot(S, c); routeCured(S, c);
+      } break;
+    case 'toRack': if (moveTo(c, RACK_PICK, cfg.humanSpeed * (c.run ? cfg.reserveRunMult : 1), dt)) { c.state = 'apron'; c.t = cfg.apronTime; } break;
+    case 'apron': c.t -= dt; if (c.t <= 0) {
+      c.dead = true; S.pendingHire--; const s = addStaff(S, c.x, c.y, true); s.face = c.face;
+      addText(S, c.x, c.y - 46, '+1 STAFF', '#FFD23F');
+    } break;
+    case 'toCamp': moveTo(c, campPos(S.camp.indexOf(c)), cfg.humanSpeed, dt); break;
+    case 'leave': if (moveTo(c, EXIT, cfg.humanSpeed, dt)) c.dead = true; break;
+  }
+}
+function staffMult(S, s) { return s.age >= S.cfg.recoverDuration ? 1 : S.cfg.recoverStart + (1 - S.cfg.recoverStart) * s.age / S.cfg.recoverDuration; }
+function stepStaff(S, s, dt) {
+  const cfg = S.cfg; s.age += dt; if (s.pop > 0) s.pop -= dt;
+  const m = staffMult(S, s), sp = cfg.staffSpeed * m;
+  switch (s.state) {
+    case 'idle': { const o = S.orders.find(o => o.state === 'open'); if (o) { o.state = 'taken'; s.o = o; s.state = 'toTake'; } break; }
+    case 'toTake': if (moveTo(s, behindCounter(s.o.cust.spot), sp, dt)) { s.state = 'take'; s.t = cfg.takeOrderTime; } break;
+    case 'take': s.t -= dt * m; if (s.t <= 0) s.state = 'toStation'; break;
+    case 'toStation': {
+      const st = S.stations[s.o.item], i = s.o.item;
+      if (moveTo(s, { x: STATION_X[i] + (s.id % 3 - 1) * 14, y: STATION_Y - 40 }, sp, dt) && st.busy < stSlots(st)) {
+        st.busy++; s.state = 'make'; s.t = stTime(cfg, st); s.tMax = s.t; s.face = 1;
+      } break;
+    }
+    case 'make': { const st = S.stations[s.o.item]; s.t -= dt * m / (st.rushT > 0 ? cfg.rushFactor : 1);
+      if (s.t <= 0) { st.busy--; s.state = 'toDeliver'; } break; }
+    case 'toDeliver': if (moveTo(s, behindCounter(s.o.cust.spot), sp, dt)) { s.state = 'deliver'; s.t = cfg.deliverTime; } break;
+    case 'deliver': s.t -= dt; if (s.t <= 0) { deliver(S, s.o); s.o = null; s.state = 'idle'; } break;
+  }
+}
+const GOALS = [
+  ['Cure 5 zombies', S => S.cured >= 5],
+  ['Apron Rack capacity 3', S => S.cfg.curedHired ? apronCap(S) >= 3 : S.staff.length >= 3],
+  ['Unlock Iced Lemonade', S => S.stations[1].level > 0],
+  ['Lemonade Lv 10', S => S.stations[0].level >= 10],
+  ['Signboard Lv 2', S => S.signboard >= 2],
+  ['Unlock Pink Lemonade', S => S.stations[2].level > 0],
+  ['8 active staff', S => S.staff.length >= 8],
+  ['Cure 250 zombies', S => S.cured >= 250],
+  ['Iced Lemonade Lv 25', S => S.stations[1].level >= 25],
+  ['Earn 2,000 coins/min', S => cpmNow(S) >= 2000 && S.t > 60],
+];
+function step(S, dt) {
+  const cfg = S.cfg;
+  S.t += dt;
+  // spawn (FTUE: zombie #1 appears mid-street; #2+ wait for the first cure)
+  if (!S.firstSpawned) { S.spawnT -= dt; if (S.spawnT <= 0) { spawnZombie(S, 170, 100); S.firstSpawned = true; S.spawnT = 2; } }
+  else if (S.cured > 0 || S.customers.length === 0) {
+    S.spawnT -= dt;
+    if (S.spawnT <= 0 && S.queue.length < cfg.queueMax) { spawnZombie(S); S.spawnT = spawnInterval(S); }
+  }
+  const minute = Math.floor(S.t / 60);
+  if (S.queue.length >= cfg.queueMax) S.tele.queueFullSec[minute] = (S.tele.queueFullSec[minute] || 0) + dt;
+  // player hand-serve
+  if (S.player.o) { S.player.t -= dt; if (S.player.t <= 0) { deliver(S, S.player.o); S.player.o = null; } }
+  for (const st of S.stations) { st.rushT -= dt; st.rushCd -= dt; st.flash = Math.max(0, st.flash - dt); }
+  S.rushProfitT = Math.max(0, S.rushProfitT - dt); S.campFullT -= dt;
+  for (const c of S.customers) stepCustomer(S, c, dt);
+  S.customers = S.customers.filter(c => !c.dead);
+  for (const s of S.staff) stepStaff(S, s, dt);
+  fillFromCamp(S);
+  GOALS.forEach((g, i) => { if (S.goals[i] == null && g[1](S)) { S.goals[i] = S.t; addText(S, 195, 660, 'Goal done: ' + g[0], '#FFD23F'); } });
+  // per-minute snapshot
+  if (minute > S.tele.minutes.length - 1 + 1 && minute >= 1) {
+    while (S.tele.minutes.length < minute) S.tele.minutes.push({ m: S.tele.minutes.length + 1, staff: S.staff.length, cap: S.cfg.curedHired ? apronCap(S) : S.staff.length, cured: S.cured, cpm: Math.round(cpmNow(S)), coins: Math.round(S.coins), camp: S.camp.length, qFull: Math.round(100 * (S.tele.queueFullSec[S.tele.minutes.length] || 0) / 60) });
+  }
+  for (const f of S.fx) { f.life -= dt; if (f.type === 'dot') { f.x += f.vx * dt; f.y += f.vy * dt; f.vy += 120 * dt; } else f.y -= 20 * dt; }
+  S.fx = S.fx.filter(f => f.life > 0);
+}
+
+// ===== bot (headless): same rules, greedy buyer =====
+function botAct(S, tapPolicy) {
+  if (!S.player.o && (tapPolicy === 'always' || S.staff.length === 0)) playerServe(S);
+  for (let guard = 0; guard < 20; guard++) {
+    const cands = ['st0', 'st1', 'st2', 'sign', 'rack'].filter(id => costOf(S, id) != null).filter(id => {
+      if (id === 'rack') return S.cfg.curedHired ? labourCount(S) >= apronCap(S) : (S.staff.length < 2 || S.queue.length >= 3);
+      if (id === 'sign') return S.queue.length < S.cfg.queueMax; // more spawns are useless while the queue is full
+      return true;
+    });
+    // rack first when affordable and every slot is filled (what the FTUE teaches), else cheapest first
+    const aff = cands.filter(id => canBuy(S, id));
+    if (!aff.length) return;
+    cands.splice(0, cands.length, ...aff.sort((a, b) => (b === 'rack') - (a === 'rack') || costOf(S, a) - costOf(S, b)));
+    if (!buy(S, cands[0])) return;
+  }
+}
+function runBot({ curedHired = true, minutes = 30, seed = 1, tap = 'nostaff', overrides = {} } = {}) {
+  const cfg = Object.assign(JSON.parse(JSON.stringify(CONFIG)), overrides, { curedHired });
+  const S = newGame(cfg, seed), dt = 0.1;
+  let acc = 0;
+  while (S.t < minutes * 60) { step(S, dt); acc += dt; if (acc >= 1) { acc = 0; botAct(S, tap); } S.fx.length = 0; }
+  const q = S.tele.queueFullSec, qf = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += q[i] || 0; return Math.round(100 * s / ((b - a) * 60)); };
+  const cpmAt = m => (S.tele.minutes[m - 1] || {}).cpm;
+  return {
+    mode: curedHired ? 'Cured=Hired' : 'Paid hire', seed, tap,
+    staff1: S.tele.staffAt[1], staff5: S.tele.staffAt[5], staff10: S.tele.staffAt[10],
+    goals: S.goals.slice(), goalsDone: S.goals.filter(g => g != null).length,
+    cpm5: cpmAt(5), cpm10: cpmAt(10), cpm20: cpmAt(20), cpm30: cpmAt(30),
+    qFull1to10: qf(0, 10), cured10: (S.tele.minutes[9] || {}).cured, staff10min: (S.tele.minutes[9] || {}).staff,
+    earned: Math.round(S.earnedTotal), minutes: S.tele.minutes,
+  };
+}
+function compare({ minutes = 30, seeds = [1, 2, 3], tap = 'nostaff', overrides = {} } = {}) {
+  const rows = [];
+  for (const ch of [true, false]) for (const seed of seeds) rows.push(runBot({ curedHired: ch, minutes, seed, tap, overrides }));
+  return rows;
+}
+function selfTest() {
+  const a = runBot({ minutes: 6, seed: 3 }), b = runBot({ minutes: 6, seed: 3 });
+  console.assert(a.earned === b.earned, 'bot not deterministic');
+  const cfg = JSON.parse(JSON.stringify(CONFIG)); cfg.curedHired = true; const S = newGame(cfg, 5);
+  let maxOver = 0, acc = 0;
+  for (let i = 0; i < 6000; i++) { step(S, 0.1); acc += 0.1; if (acc >= 1) { acc = 0; botAct(S, 'always'); } maxOver = Math.max(maxOver, S.staff.length - apronCap(S)); console.assert(S.camp.length <= campCap(S), 'camp over cap'); }
+  console.assert(maxOver <= 0, 'staff exceeded Apron Rack capacity');
+  console.assert(S.staff.length > 0 && S.cured >= S.staff.length, 'every staff must come from a cure');
+  return { deterministic: a.earned === b.earned, staffNeverOverCap: maxOver <= 0, staffFromCures: S.cured >= S.staff.length };
+}
+
+// ===== rendering =====
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let scale = 1;
+function resize() {
+  scale = Math.min(innerWidth / W, innerHeight / H); const dpr = window.devicePixelRatio || 1;
+  cv.style.width = W * scale + 'px'; cv.style.height = H * scale + 'px';
+  cv.width = Math.round(W * scale * dpr); cv.height = Math.round(H * scale * dpr);
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+const FIG_SCALE = 1.25;
+const ZOMBIE_COL = '#7E9B78', HUMAN_COL = '#F2D7B6', APRON_COL = '#FFD23F', RECOVER_COL = '#C9B497';
+// Faceless capsule figure. hunch 0..1 (zombie ~20 deg lean), arms 0..1 (1 = stretched forward), feet at (x,y).
+function drawFig(x, y, o) {
+  const { hunch = 0, col = HUMAN_COL, arms = 0, apron = false, face = 1, walk = 0, sx = 1, sy = 1, alpha = 1 } = o;
+  ctx.save(); ctx.globalAlpha = alpha; ctx.translate(x, y); ctx.scale(FIG_SCALE * sx * face, FIG_SCALE * sy);
+  const ph = Math.sin(walk * 0.25) * 4 * (1 - hunch * 0.5);
+  ctx.strokeStyle = hexLerp(col, '#000000', 0.35); ctx.lineWidth = 3.5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(ph, 0); ctx.moveTo(0, -12); ctx.lineTo(-ph, 0); ctx.stroke();
+  ctx.translate(0, -12); ctx.rotate(hunch * 0.35); // ~20 deg forward lean
+  ctx.fillStyle = col; ctx.beginPath(); ctx.roundRect(-6, -20, 12, 22, 6); ctx.fill();
+  ctx.beginPath(); ctx.arc(hunch * 3, -27, 6.5, 0, Math.PI * 2); ctx.fill();
+  if (apron) { ctx.fillStyle = APRON_COL; ctx.beginPath(); ctx.moveTo(-4, -15); ctx.lineTo(4, -15); ctx.lineTo(7, 0); ctx.lineTo(-7, 0); ctx.closePath(); ctx.fill(); }
+  // arms: forward (zombie) -> at sides (human)
+  ctx.strokeStyle = col; ctx.lineWidth = 3;
+  const ax = lerp(2, 16, arms), ay = lerp(-4, -17, arms);
+  ctx.beginPath(); ctx.moveTo(1, -16); ctx.lineTo(ax, ay); ctx.moveTo(-1, -16); ctx.lineTo(ax - 3 * arms, ay + 3 * arms); ctx.stroke();
+  ctx.restore();
+}
+function drawGlass(x, y, item, s = 1) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = CONFIG.stations[item]?.color || APRON_COL; ctx.beginPath(); ctx.moveTo(-4, -10); ctx.lineTo(4, -10); ctx.lineTo(3, 0); ctx.lineTo(-3, 0); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(4, -10, 2.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+function popScale(p) { // squash 0.9 -> stretch 1.15 -> 1 over 0.25 s
+  if (p <= 0) return [1, 1]; const k = 1 - p / 0.25; const sy = k < 0.4 ? lerp(1, 0.9, k / 0.4) : lerp(1.15, 1, (k - 0.4) / 0.6); return [2 - sy, sy];
+}
+function custLook(c) {
+  if (c.state === 'cure' || (c.kind === 'human' && c.cureK < 1)) {
+    const k = c.cureK; return { hunch: 1 - k, col: hexLerp(ZOMBIE_COL, HUMAN_COL, k), arms: 1 - k };
+  }
+  return c.kind === 'zombie' ? { hunch: 1, col: ZOMBIE_COL, arms: 1 } : { hunch: 0, col: HUMAN_COL, arms: 0 };
+}
+function button(b, label, sub, enabled, active) {
+  ctx.fillStyle = active ? '#4a4320' : enabled ? '#3b4a33' : '#2c302a'; ctx.strokeStyle = enabled ? '#FFD23F' : '#4a4f47'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = enabled ? '#f3eee0' : '#8b8f86'; ctx.textAlign = 'center'; ctx.font = 'bold 13px system-ui';
+  ctx.fillText(label, b.x + b.w / 2, b.y + 26); ctx.font = '12px system-ui'; ctx.fillStyle = enabled ? '#FFD23F' : '#8b8f86'; ctx.fillText(sub, b.x + b.w / 2, b.y + 46);
+}
+function uiButtons(S) {
+  const out = [];
+  S.stations.forEach((st, i) => {
+    const c = costOf(S, 'st' + i), b = BUTTONS[i];
+    const name = ['Lemonade', 'Iced', 'Pink'][i];
+    if (st.level === 0) out.push([b, 'Unlock ' + name, fmt(c) + ' coins', canBuy(S, 'st' + i)]);
+    else out.push([b, name + ' Lv ' + st.level, c == null ? 'MAX' : 'Up ' + fmt(c), canBuy(S, 'st' + i)]);
+  });
+  const rc = rackCost(S);
+  out.push([BUTTONS[3], S.cfg.curedHired ? 'Apron Rack +slot' : 'Hire staff', rc == null ? 'MAX' : fmt(rc) + ' coins', canBuy(S, 'rack')]);
+  out.push([BUTTONS[4], 'Signboard Lv ' + S.signboard, S.signboard >= S.cfg.signboardMax ? 'MAX' : fmt(signCost(S)) + ' coins', canBuy(S, 'sign')]);
+  out.push([BUTTONS[5], 'Lemon Rush', S.rushProfitT > 0 ? 'x2 ' + mmss(S.rushProfitT) : 'Free x2 3 min', true, S.rushProfitT > 0]);
+  return out;
+}
+// FTUE pointer steps (concept §6). Each shows a pulsing hand at a target until its done-condition holds.
+const FTUE = [
+  { id: 'serve', text: 'Tap to serve', when: S => S.playerServes === 0 && S.spots.some(c => c && c.state === 'wait'), done: S => S.playerServes > 0, at: S => { const c = S.spots.find(c => c && c.state === 'wait'); return c ? { x: c.x, y: c.y - 20 } : null; } },
+  { id: 'rack', text: S => S.cfg.curedHired ? '+1 staff slot' : 'Hire staff', when: S => canBuy(S, 'rack') && S.t > 20, done: S => S.apronLvl > 0 || (!S.cfg.curedHired && S.staff.length > 0), at: () => btnCenter(3) },
+  { id: 'lemon', text: 'Upgrade Lemonade', when: S => (S.apronLvl > 0 || !S.cfg.curedHired) && canBuy(S, 'st0'), done: S => S.stations[0].level >= 5, at: () => btnCenter(0) },
+  { id: 'iced', text: 'Unlock Iced Lemonade', when: S => canBuy(S, 'st1'), done: S => S.stations[1].level > 0, at: () => btnCenter(1) },
+  { id: 'camp', text: 'Bigger rack: campers join!', when: S => S.cfg.curedHired && S.camp.length > 0 && canBuy(S, 'rack'), done: S => S.ftue.mark.camp != null && S.apronLvl > S.ftue.mark.camp, at: () => btnCenter(3), onShow: S => { S.ftue.mark.camp ??= S.apronLvl; } },
+  { id: 'sign', text: 'More customers', when: S => S.t > 300 && canBuy(S, 'sign'), done: S => S.signboard > 0, at: () => btnCenter(4) },
+  { id: 'rush', text: 'Free x2 profit!', when: S => S.t > 420, done: S => S.rushUsed > 0 || (S.ftue.shownAt.rush != null && S.t - S.ftue.shownAt.rush > 30), at: () => btnCenter(5) },
+];
+const btnCenter = i => ({ x: BUTTONS[i].x + BUTTONS[i].w / 2, y: BUTTONS[i].y + 12 });
+function activeFtue(S) {
+  for (const f of FTUE) {
+    if (S.ftue.done[f.id]) continue;
+    if (f.done(S)) { S.ftue.done[f.id] = true; continue; }
+    if (f.when(S)) { S.ftue.shownAt[f.id] ??= S.t; f.onShow && f.onShow(S); return f; }
+  }
+  return null;
+}
+
+function render(S) {
+  const cfg = S.cfg, warm = clamp(S.cured / 300, 0, 1);
+  ctx.fillStyle = '#23271f'; ctx.fillRect(0, 0, W, H);
+  // street + buildings: green-grey -> warm as the city recovers
+  ctx.fillStyle = hexLerp('#4d5a49', '#7a6a52', warm); ctx.fillRect(0, 40, W, 130);
+  ctx.strokeStyle = hexLerp('#6f7d69', '#b39c78', warm); ctx.lineWidth = 1.5;
+  for (let i = 0; i < 8; i++) { const bx = i * 52 + 4, bh = 22 + (i * 37 % 30); ctx.strokeRect(bx, 70 - bh, 40, bh); }
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.setLineDash([10, 10]); ctx.beginPath(); ctx.moveTo(0, 122); ctx.lineTo(W, 122); ctx.stroke(); ctx.setLineDash([]);
+  // counter + canopy sign
+  ctx.fillStyle = '#6b5a44'; ctx.fillRect(40, 208, 320, 18);
+  for (let i = 0; i < 16; i++) { ctx.fillStyle = i % 2 ? '#f5f0e0' : APRON_COL; ctx.fillRect(40 + i * 20, 226, 20, 6); }
+  ctx.fillStyle = '#2b2f2a'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.fillText('L E M O N A D E', 200, 221);
+  ctx.fillStyle = '#2e332c'; ctx.fillRect(0, 232, W, 260);
+  // stations
+  S.stations.forEach((st, i) => {
+    const x = STATION_X[i], y = STATION_Y;
+    ctx.fillStyle = st.level ? '#3a4337' : '#2a2d28'; ctx.strokeStyle = st.flash > 0 ? APRON_COL : st.rushT > 0 ? '#fff' : '#4d5549'; ctx.lineWidth = st.flash > 0 ? 4 : 2;
+    ctx.beginPath(); ctx.roundRect(x - 48, y - 22, 96, 64, 8); ctx.fill(); ctx.stroke();
+    // pitcher / ice cube silhouettes
+    ctx.fillStyle = st.level ? st.def.color : '#555'; ctx.globalAlpha = st.level ? 1 : 0.5;
+    if (i === 1) { ctx.fillRect(x - 12, y - 8, 12, 12); ctx.fillRect(x + 2, y - 2, 10, 10); }
+    else { ctx.beginPath(); ctx.moveTo(x - 10, y - 10); ctx.lineTo(x + 8, y - 10); ctx.lineTo(x + 10, y + 12); ctx.lineTo(x - 12, y + 12); ctx.closePath(); ctx.fill(); ctx.strokeStyle = st.def.color; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x + 12, y, 6, -1.2, 1.2); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#ddd'; ctx.font = '11px system-ui';
+    if (st.level) { ctx.fillText('Lv ' + st.level + '  ' + fmt(stPrice(cfg, st)) + 'c', x, y + 30); for (let k = 0; k < stSlots(st); k++) { ctx.fillStyle = k < st.busy ? APRON_COL : '#555'; ctx.fillRect(x - 40 + k * 8, y - 18, 6, 4); } }
+    else ctx.fillText('LOCKED ' + fmt(st.def.unlockCost), x, y + 30);
+    if (st.rushT > 0) { ctx.fillStyle = '#fff'; ctx.fillText('RUSH', x + 30, y - 10); }
+  });
+  // apron rack: hooks = capacity; hanging apron = free slot waiting for a cured human
+  ctx.fillStyle = '#2a2f28'; ctx.beginPath(); ctx.roundRect(RACK.x, RACK.y, RACK.w, RACK.h, 10); ctx.fill();
+  ctx.fillStyle = '#ddd'; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'left';
+  if (cfg.curedHired) {
+    const cap = apronCap(S), used = S.staff.length + S.customers.filter(c => c.state === 'apron').length; // apron stays on its hook until picked up
+    ctx.fillText('Apron Rack ' + S.staff.length + '/' + cap, RACK.x + 8, RACK.y + 16);
+    for (let i = 0; i < 12; i++) {
+      const hx = RACK.x + 14 + (i % 6) * 26, hy = RACK.y + 30 + Math.floor(i / 6) * 32;
+      if (i >= cap) { ctx.fillStyle = '#3a3f38'; ctx.fillRect(hx, hy, 14, 2); continue; }
+      ctx.strokeStyle = '#999'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(hx + 14, hy); ctx.stroke();
+      if (i >= used) { ctx.fillStyle = APRON_COL; ctx.beginPath(); ctx.moveTo(hx + 4, hy + 2); ctx.lineTo(hx + 10, hy + 2); ctx.lineTo(hx + 13, hy + 18); ctx.lineTo(hx + 1, hy + 18); ctx.closePath(); ctx.fill(); }
+    }
+  } else { ctx.fillText('Staff room (paid)', RACK.x + 8, RACK.y + 16); ctx.font = '11px system-ui'; ctx.fillText('staff ' + S.staff.length + ' (bought)', RACK.x + 8, RACK.y + 40); }
+  // camp
+  ctx.fillStyle = '#2a2f28'; ctx.beginPath(); ctx.roundRect(CAMP.x, CAMP.y, CAMP.w, CAMP.h, 10); ctx.fill();
+  ctx.fillStyle = '#ddd'; ctx.font = 'bold 12px system-ui';
+  if (cfg.curedHired) {
+    ctx.fillText('Camp ' + S.camp.length + '/' + campCap(S), CAMP.x + 8, CAMP.y + 16);
+    for (let i = 0; i < 3; i++) { const tx = CAMP.x + 30 + i * 50; ctx.strokeStyle = '#c9b497'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(tx - 14, CAMP.y + 40); ctx.lineTo(tx, CAMP.y + 24); ctx.lineTo(tx + 14, CAMP.y + 40); ctx.stroke(); }
+  } else ctx.fillText('(no camp in baseline)', CAMP.x + 8, CAMP.y + 16);
+  // customers
+  const sorted = S.customers.slice().sort((a, b) => a.y - b.y);
+  for (const c of sorted) {
+    const L = custLook(c); const [sx, sy] = popScale(c.pop);
+    const sway = c.kind === 'zombie' && c.state !== 'cure' ? Math.sin(S.t * 2 + c.id) * 0.08 : 0;
+    drawFig(c.x, c.y, { ...L, hunch: L.hunch + sway, face: c.face, walk: c.walk * (c.kind === 'zombie' ? 0.6 : 1), sx, sy, apron: c.state === 'apron' && c.t < S.cfg.apronTime * 0.5 });
+    if (c.state === 'wait') c.items.forEach((it, k) => { if (k < c.pending) drawGlass(c.x - 6 + k * 12, c.y - 60, it, 0.9); });
+    if (c.state === 'drink') drawGlass(c.x + 8 * c.face, c.y - 34, c.items[0], 0.9);
+    if (c.state === 'apron') { // apron flies from the rack hook onto the body
+      const k = 1 - c.t / S.cfg.apronTime; ctx.fillStyle = APRON_COL; ctx.globalAlpha = 1 - Math.max(0, k - 0.5) * 2;
+      const ax = lerp(RACK.x + 60, c.x, Math.min(1, k * 2)), ay = lerp(RACK.y + 40, c.y - 18, Math.min(1, k * 2)); ctx.fillRect(ax - 5, ay - 6, 10, 12); ctx.globalAlpha = 1;
+    }
+    if (S.player.o && S.player.o.cust === c) { ctx.fillStyle = '#000a'; ctx.fillRect(c.x - 14, c.y - 66, 28, 5); ctx.fillStyle = APRON_COL; ctx.fillRect(c.x - 14, c.y - 66, 28 * (1 - S.player.t / S.cfg.playerServeTime), 5); }
+  }
+  // staff
+  for (const s of S.staff.slice().sort((a, b) => a.y - b.y)) {
+    const k = Math.min(1, s.age / cfg.recoverDuration); const [sx, sy] = popScale(s.pop);
+    drawFig(s.x, s.y, { hunch: 0.3 * (1 - k), col: hexLerp(RECOVER_COL, HUMAN_COL, k), arms: 0, apron: true, face: s.face, walk: s.walk, sx, sy });
+    if (s.state === 'make') { ctx.fillStyle = '#000a'; ctx.fillRect(s.x - 12, s.y - 60, 24, 4); ctx.fillStyle = '#fff'; ctx.fillRect(s.x - 12, s.y - 60, 24 * (1 - s.t / s.tMax), 4); }
+    if ((s.state === 'toDeliver' || s.state === 'deliver') && s.o) drawGlass(s.x + 9 * s.face, s.y - 22, s.o.item, 0.8);
+  }
+  // fx
+  for (const f of S.fx) {
+    ctx.globalAlpha = clamp(f.life * 2, 0, 1);
+    if (f.type === 'dot') { ctx.fillStyle = f.col; ctx.beginPath(); ctx.arc(f.x, f.y, 2.5, 0, Math.PI * 2); ctx.fill(); }
+    else { ctx.fillStyle = f.col; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(f.text, f.x, f.y); }
+  }
+  ctx.globalAlpha = 1;
+  // HUD
+  ctx.fillStyle = '#151813'; ctx.fillRect(0, 0, W, 40);
+  ctx.textAlign = 'left'; ctx.font = 'bold 16px system-ui'; ctx.fillStyle = APRON_COL; ctx.fillText('● ' + fmt(S.coins), 10, 18);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText(fmt(cpmNow(S)) + '/min' + (S.rushProfitT > 0 ? '  x2' : ''), 10, 33);
+  ctx.textAlign = 'center'; ctx.font = 'bold 14px system-ui'; ctx.fillStyle = HUMAN_COL; ctx.fillText('Cured ' + S.cured, 175, 18);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText(mmss(S.t) + (speed > 1 ? '  x' + speed : '') + (cfg.curedHired ? '' : '  BASELINE'), 175, 33);
+  ctx.textAlign = 'right'; ctx.font = 'bold 14px system-ui'; ctx.fillStyle = APRON_COL;
+  ctx.fillText('Staff ' + S.staff.length + (cfg.curedHired ? '/' + apronCap(S) : ''), 340, 18);
+  if (cfg.curedHired) { ctx.font = '11px system-ui'; ctx.fillStyle = '#bbb'; ctx.fillText('camp ' + S.camp.length, 340, 33); }
+  // goals
+  const gi = S.goals.findIndex(g => g == null), stars = S.goals.filter(g => g != null).length;
+  ctx.fillStyle = '#2a2f28'; ctx.beginPath(); ctx.roundRect(6, 612, 378, 80, 10); ctx.fill();
+  ctx.textAlign = 'left'; ctx.font = 'bold 12px system-ui'; ctx.fillStyle = APRON_COL; ctx.fillText('★ ' + stars + '/10', 16, 632);
+  ctx.fillStyle = '#ddd'; ctx.font = '12px system-ui';
+  if (gi >= 0) { ctx.fillText('Goal ' + (gi + 1) + ': ' + GOALS[gi][0], 70, 632); const nx = S.goals.findIndex((g, i) => g == null && i > gi); if (nx >= 0) { ctx.fillStyle = '#888'; ctx.fillText('then: ' + GOALS[nx][0], 70, 650); } }
+  else ctx.fillText('Outlet complete! (Juice Cart = next build)', 70, 632);
+  for (let i = 0; i < 10; i++) { ctx.fillStyle = S.goals[i] != null ? APRON_COL : '#444'; ctx.fillRect(16 + i * 36, 668, 30, 8); }
+  // buttons
+  for (const [b, l, s, en, act] of uiButtons(S)) button(b, l, s, en, act);
+  // FTUE hand
+  const f = activeFtue(S);
+  if (f && !S.popup) {
+    const p = f.at(S);
+    if (p) {
+      const pulse = 1 + Math.sin(performance.now() / 150) * 0.15;
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.x, p.y, 16 * pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(p.x + 6, p.y + 8); ctx.lineTo(p.x + 22, p.y + 30); ctx.lineTo(p.x + 10, p.y + 30); ctx.closePath(); ctx.fill();
+      const txt = typeof f.text === 'function' ? f.text(S) : f.text; ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(txt).width + 16;
+      const bx = clamp(p.x - tw / 2, 4, W - tw - 4), by = p.y > 400 ? p.y - 52 : p.y + 36;
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.roundRect(bx, by, tw, 22, 8); ctx.fill(); ctx.fillStyle = '#222'; ctx.textAlign = 'left'; ctx.fillText(txt, bx + 8, by + 15);
+    }
+  }
+  // offline popup
+  if (S.popup) {
+    ctx.fillStyle = '#000b'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#2e332c'; ctx.beginPath(); ctx.roundRect(40, 300, 310, 200, 14); ctx.fill();
+    ctx.textAlign = 'center'; ctx.fillStyle = '#eee'; ctx.font = 'bold 15px system-ui'; ctx.fillText('While you were away (' + S.popup.minutes + ' min)', 195, 334);
+    ctx.font = '13px system-ui'; ctx.fillText(S.popup.cured + ' zombies were cured', 195, 362); ctx.fillStyle = APRON_COL; ctx.fillText('+' + fmt(S.popup.coins) + ' coins', 195, 384);
+    ctx.fillStyle = '#aaa'; ctx.font = '11px system-ui'; ctx.fillText('(offline cures add no staff, concept §5.5)', 195, 404);
+    button(POP_BTN[0], 'Collect', 'x1', true); button(POP_BTN[1], 'Watch ad', 'x2 (fake)', true, true);
+  }
+}
+const POP_BTN = [{ x: 60, y: 420, w: 130, h: 60 }, { x: 200, y: 420, w: 130, h: 60 }];
+
+// ===== input =====
+const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+cv.addEventListener('pointerdown', e => {
+  const r = cv.getBoundingClientRect(), p = { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
+  e.preventDefault();
+  if (G.popup) { if (inRect(p, POP_BTN[0])) collectOffline(G, 1); else if (inRect(p, POP_BTN[1])) collectOffline(G, 2); return; }
+  for (const b of BUTTONS) if (inRect(p, b)) { if (b.id === 'rush') useRush(G); else buy(G, b.id); return; }
+  // counter band: serve the nearest waiting customer
+  if (p.y > 140 && p.y < 235) {
+    let best = null, bd = 60; for (const c of G.spots) if (c && c.state === 'wait' && G.orders.some(o => o.cust === c && o.state === 'open')) { const d = Math.abs(c.x - p.x); if (d < bd) { bd = d; best = c; } }
+    if (best) playerServe(G, best); return;
+  }
+  for (let i = 0; i < 3; i++) if (Math.abs(p.x - STATION_X[i]) < 50 && Math.abs(p.y - (STATION_Y + 10)) < 36) { rushStation(G, i); return; }
+});
+
+// ===== tuning panel =====
+let G = newGame(CONFIG), speed = 1;
+const panel = document.getElementById('panel');
+function buildPanel() {
+  let h = '<h3>Mode</h3>';
+  h += `<button id="mCH" class="${CONFIG.curedHired ? 'on' : ''}">Cured = Hired</button><button id="mPaid" class="${CONFIG.curedHired ? '' : 'on'}">Baseline: paid hire</button>`;
+  h += '<h3>Time</h3>' + [1, 4, 10].map(s => `<button data-speed="${s}" class="${speed === s ? 'on' : ''}">x${s}</button>`).join('') +
+    '<button id="bReset">Reset</button><button id="bSkip">Skip 1 hour (offline)</button><button id="bCoins">+1000 coins</button>';
+  h += '<h3>Telemetry (this session)</h3><pre id="tele"></pre><button id="bCopy">Copy JSON</button>';
+  h += '<h3>Bot comparison (headless)</h3><label>minutes <input type="number" id="botMin" value="30"></label><label>player taps <select id="botTap"><option value="nostaff">only while 0 staff</option><option value="always">always (active)</option></select></label><button id="bBot">Run: Cured=Hired vs Paid hire (seeds 1-3)</button><div id="botOut"></div>';
+  h += '<h3>CONFIG (live; arrays/stations as JSON; Reset to restart)</h3>';
+  for (const [k, v] of Object.entries(CONFIG)) {
+    if (typeof v === 'number') h += `<label>${k} <input type="number" step="any" data-k="${k}" value="${v}"></label>`;
+    else if (typeof v === 'boolean' && k !== 'curedHired') h += `<label>${k} <input type="checkbox" data-k="${k}" ${v ? 'checked' : ''}></label>`;
+    else if (Array.isArray(v)) h += `<label style="display:block">${k}<textarea data-k="${k}" rows="${k === 'stations' ? 6 : 1}">${JSON.stringify(v)}</textarea></label>`;
+  }
+  panel.innerHTML = h;
+  panel.querySelector('#mCH').onclick = () => { CONFIG.curedHired = true; G = newGame(CONFIG); buildPanel(); };
+  panel.querySelector('#mPaid').onclick = () => { CONFIG.curedHired = false; G = newGame(CONFIG); buildPanel(); };
+  panel.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; buildPanel(); });
+  panel.querySelector('#bReset').onclick = () => { G = newGame(CONFIG); };
+  panel.querySelector('#bSkip').onclick = () => { skipOffline(G, 60); panel.style.display = 'none'; };
+  panel.querySelector('#bCoins').onclick = () => { G.coins += 1000; };
+  panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G) }, null, 1));
+  panel.querySelector('#bBot').onclick = () => {
+    const out = panel.querySelector('#botOut'); out.textContent = 'running...';
+    setTimeout(() => { const rows = compare({ minutes: +panel.querySelector('#botMin').value, tap: panel.querySelector('#botTap').value }); out.innerHTML = botTable(rows); console.log('[bot]', rows); }, 20);
+  };
+  panel.querySelectorAll('[data-k]').forEach(inp => inp.onchange = () => {
+    const k = inp.dataset.k;
+    try { CONFIG[k] = inp.type === 'checkbox' ? inp.checked : inp.tagName === 'TEXTAREA' ? JSON.parse(inp.value) : +inp.value; inp.style.borderColor = '#444'; }
+    catch { inp.style.borderColor = 'red'; }
+  });
+}
+function botTable(rows) {
+  let h = '<table><tr><th>mode/seed</th><th>staff1</th><th>staff5</th><th>staff10</th><th>goals</th><th>goal10</th><th>cpm5</th><th>cpm10</th><th>cpm20</th><th>qFull 1-10</th></tr>';
+  for (const r of rows) h += `<tr><td>${r.mode} s${r.seed}</td><td>${mmss(r.staff1)}</td><td>${mmss(r.staff5)}</td><td>${mmss(r.staff10)}</td><td>${r.goalsDone}</td><td>${mmss(r.goals[9])}</td><td>${r.cpm5 ?? '–'}</td><td>${r.cpm10 ?? '–'}</td><td>${r.cpm20 ?? '–'}</td><td>${r.qFull1to10}%</td></tr>`;
+  return h + '</table>';
+}
+function teleSummary(S) {
+  return { t: Math.round(S.t), mode: S.cfg.curedHired ? 'Cured=Hired' : 'Paid hire', cured: S.cured, staff: S.staff.length, coins: Math.round(S.coins), cpm: Math.round(cpmNow(S)),
+    firstCure: S.tele.curedBins.findIndex(x => x), staffAt: { 1: S.tele.staffAt[1], 5: S.tele.staffAt[5], 10: S.tele.staffAt[10] }, goals: S.goals.map(g => g == null ? null : Math.round(g)),
+    queueFullPct1to10: Math.round(100 * S.tele.queueFullSec.slice(0, 10).reduce((a, b) => a + (b || 0), 0) / Math.max(1, Math.min(600, S.t))), minutes: S.tele.minutes };
+}
+function teleText(S) {
+  const T = teleSummary(S);
+  let s = `GB1 first staff:  ${mmss(T.staffAt[1])}  (target <= 0:20)\nGB2 staff #5:     ${mmss(T.staffAt[5])}  (target 3:00-5:00)\n    staff #10:    ${mmss(T.staffAt[10])}\nGB3 goal 10:      ${mmss(T.goals[9])}  (target 25-45 min)\nGB4 queue full m1-10: ${T.queueFullPct1to10}%  (target 20-50%)\n`;
+  s += `first cure: ${T.firstCure < 0 ? '–' : T.firstCure + ' s'} | cured ${T.cured} | cpm ${T.cpm}\ngoals: ${T.goals.map((g, i) => (i + 1) + ':' + mmss(g)).join(' ')}\n\nmin staff/cap cured  cpm  camp qFull%\n`;
+  for (const m of T.minutes.slice(-15)) s += `${String(m.m).padStart(3)} ${String(m.staff).padStart(5)}/${String(m.cap).padEnd(3)} ${String(m.cured).padStart(5)} ${String(m.cpm).padStart(5)} ${String(m.camp).padStart(4)} ${String(m.qFull).padStart(5)}\n`;
+  return s;
+}
+document.getElementById('btnPanel').onclick = () => { const on = panel.style.display !== 'block'; panel.style.display = on ? 'block' : 'none'; if (on) buildPanel(); };
+addEventListener('keydown', e => { if (e.key === 't' || e.key === 'T') document.getElementById('btnPanel').click(); });
+
+// ===== main loop =====
+let last = performance.now(), teleTimer = 0, logMin = 0;
+function frame(now) {
+  const real = Math.min(0.1, (now - last) / 1000); last = now;
+  if (!G.popup) { let rem = real * speed; while (rem > 0) { const d = Math.min(0.05, rem); step(G, d); rem -= d; } }
+  render(G);
+  teleTimer += real; if (teleTimer > 0.5 && panel.style.display === 'block') { teleTimer = 0; const el = document.getElementById('tele'); if (el) el.textContent = teleText(G); }
+  if (Math.floor(G.t / 60) > logMin) { logMin = Math.floor(G.t / 60); console.log('[tele]', JSON.stringify(G.tele.minutes[G.tele.minutes.length - 1])); }
+  requestAnimationFrame(frame);
+}
+window.LA = { CONFIG, newGame, step, render, buy, botAct, runBot, compare, selfTest, teleSummary, paidHireCosts, get G() { return G; } };
+console.log('[selfTest]', selfTest());
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

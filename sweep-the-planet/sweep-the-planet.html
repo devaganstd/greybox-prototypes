@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Sweep the Planet greybox</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e1014;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#eee}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;touch-action:none;background:#0e1014}
+  #btnPanel{position:fixed;top:6px;right:6px;z-index:5;width:34px;height:34px;border-radius:8px;border:1px solid #445;background:#222831;color:#eee;font-size:18px;cursor:pointer}
+  #panel{position:fixed;top:0;right:0;bottom:0;width:min(390px,100vw);z-index:4;background:rgba(16,18,22,.97);overflow:auto;padding:46px 12px 20px;box-sizing:border-box;font-size:12px;display:none}
+  #panel h3{margin:14px 0 6px;font-size:13px;color:#3EE6FF}
+  #panel button{background:#2a303a;color:#eee;border:1px solid #445;border-radius:6px;padding:5px 8px;margin:2px;font-size:12px;cursor:pointer}
+  #panel button.on{background:#3EE6FF;color:#111}
+  #panel textarea{width:100%;background:#191c22;color:#eee;border:1px solid #444;border-radius:4px;font:11px monospace;box-sizing:border-box}
+  #panel pre{white-space:pre-wrap;font:11px/1.35 monospace;background:#191c22;padding:6px;border-radius:6px;margin:4px 0;overflow-x:auto}
+  #panel table{border-collapse:collapse;font:10px monospace;width:100%}
+  #panel td,#panel th{border:1px solid #333;padding:2px 3px;text-align:right}
+  #panel th:first-child,#panel td:first-child{text-align:left}
+  #botOut{overflow-x:auto}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<button id="btnPanel" title="Tuning + telemetry (T)">&#9881;</button>
+<div id="panel"></div>
+<script>
+'use strict';
+// Sweep the Planet greybox. Concept: 03_konsep-gd/sweep-the-planet-2026-11-19.md §13.
+// X = Stone Grass (sweep reveals the surface, canister, trips, upgrades). Unique = Clean = Power:
+// a 100% clean tile is Lit and pays $/s while it stays clean; Dust Storms re-dust Lit tiles; Keeper Drones re-clean them.
+// ===== CONFIG: every tunable lives here (concept §13.2; values changed by greybox tuning are marked "tuned") =====
+const CONFIG = {
+  grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 800, 2000, 6000] }, // tuned (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
+  player: { speed: 4.0 /* tiles per second */ },
+  dust: { kgPerTile: 0.25, pricePerKg: 4.0 }, // tuned (concept 1.0)
+  lit: { powerPerTile: 0.0015 /* $ per second; tuned (concept 0.01 = Lit beat sales in minute 1, Launch at 9 min) */, gridLinkMult: 2, linkRecalcSec: 1 },
+  tools: [
+    { id: 'Toothbrush', width: 1, passes: 3, capKg: 10, speedMult: 1.0, cost: 0 },
+    { id: 'Scrub Brush', width: 1, passes: 2, capKg: 15, speedMult: 1.0, cost: 80 },
+    { id: 'Mop', width: 2, passes: 2, capKg: 20, speedMult: 1.0, cost: 400, shineMult: 1.25, shineSec: 60 },
+    { id: 'Push Broom', width: 3, passes: 1, capKg: 30, speedMult: 1.0, cost: 1200 }, // cost tuned (concept 2000)
+    { id: 'Vacuum Pack', width: 3, passes: 1, capKg: 60, speedMult: 1.0, cost: 5000, suctionRadius: 1 }, // cost tuned (concept 9000)
+  ],
+  upgrades: {
+    growth: 1.15,
+    capacity: { base: 60, step: 0.2 /* +20% capacity per level */ }, // bases tuned x4 with pricePerKg
+    width: { base: 800, step: 1, max: 2 },
+    speed: { base: 100, step: 0.08 },
+    payout: { base: 160, step: 0.15 },
+    panelBoost: { base: 240, step: 0.15 },
+  },
+  storm: { intervalSec: 90, warningSec: 8, litFraction: 0.10, dirtAfter: 0.5, firstStormAtSec: 130, firstStormTiles: 6, bandRows: 16, frontSec: 4, samples: 4 },
+  keeper: { cost: [0, 150, 600, 2000, 6000, 15000], max: 6, secPerPass: 0.5, speed: 3.0, passPower: 0.5 }, // secPerPass tuned (concept 1.5: 3 Keepers held only 85%)
+  hauler: { cost: [500, 3000, 12000], radius: 3 }, // G9 optional: not built in this greybox
+  refinery: { defaultFuelShare: 0.3, tankKg: 150, launchMinLit: 0.7 },
+  launch: { stardustPerLitPct: 0.1 },
+  offline: { capMin: 120, noKeeperUptime: 0.4, keeperTravelFactor: 0.5 },
+  ads: { firstAdMinSec: 240 }, // no ads in greybox; kept for reference
+  feel: { popSec: 0.22, popScale: 0.08, toneWindowSec: 1, toneMax: 8, milestonePct: 10, introSec: 3.2, zoomOutSec: 2.4 },
+  seed: 1,
+};
+
+// ===== helpers =====
+const W = 390, H = 844, HUD_H = 64, BAR_Y = 722, VIEW_CY = (HUD_H + BAR_Y) / 2;
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const lerp = (a, b, k) => a + (b - a) * k;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ease = k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+function hexLerp(a, b, k) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const r = Math.round(lerp(pa >> 16, pb >> 16, k)), g = Math.round(lerp(pa >> 8 & 255, pb >> 8 & 255, k)), bl = Math.round(lerp(pa & 255, pb & 255, k));
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
+}
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : n >= 100 ? Math.floor(n).toString() : n >= 10 ? n.toFixed(1) : n.toFixed(2);
+const mmss = s => s == null ? '–' : Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+const clone = o => JSON.parse(JSON.stringify(o));
+function deepMerge(a, b) { for (const k in b) { if (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k]) && a[k]) deepMerge(a[k], b[k]); else a[k] = b[k]; } return a; }
+
+// ===== map geometry (48 x 72 tiles, 6 sectors of 24 x 24: 0/1 bottom, 2/3 middle, 4/5 top) =====
+const C = 48, R = 72, N = C * R;
+const DEPOT = { c: 9, r: 62, w: 6, h: 4 }; // left 4 = Depot, right 2 = Refinery + Launch Pad
+const DEPOT_C = { x: DEPOT.c + 2, y: DEPOT.r + 2 };
+const PADS = [null, { c: 21, r: 57, w: 2, h: 2 }, { c: 10, r: 48, w: 2, h: 2 }, { c: 21, r: 34, w: 2, h: 2 }, { c: 10, r: 24, w: 2, h: 2 }, { c: 21, r: 10, w: 2, h: 2 }];
+const sectorOf = (c, r) => (2 - Math.floor(r / 24)) * 2 + (c >= 24 ? 1 : 0);
+const SEC = new Uint8Array(N), KIND = new Uint8Array(N), DOTS = new Float32Array(N * 12);
+function hsh(i) { let h = Math.imul(i ^ 0x9e3779b9, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return h >>> 0; }
+for (let i = 0; i < N; i++) {
+  const c = i % C, r = (i / C) | 0; SEC[i] = sectorOf(c, r);
+  KIND[i] = c >= DEPOT.c && c < DEPOT.c + DEPOT.w && r >= DEPOT.r && r < DEPOT.r + DEPOT.h ? 1 : 0;
+  const h1 = hsh(i), h2 = hsh(i + 7777);
+  for (let k = 0; k < 6; k++) { DOTS[i * 12 + k * 2] = 0.1 + ((h1 >>> (k * 5)) & 31) / 32 * 0.8; DOTS[i * 12 + k * 2 + 1] = 0.1 + ((h2 >>> (k * 5)) & 31) / 32 * 0.8; }
+}
+const SWEEPABLE = N - DEPOT.w * DEPOT.h;
+const inRectT = (x, y, r) => x >= r.c && x < r.c + r.w && y >= r.r && y < r.r + r.h;
+
+// ===== economy =====
+const UPS = ['capacity', 'width', 'speed', 'payout', 'panelBoost'];
+const toolDef = S => S.cfg.tools[S.tool];
+const capKg = S => toolDef(S).capKg * (1 + S.cfg.upgrades.capacity.step * S.up.capacity);
+const toolWidth = S => toolDef(S).width + S.cfg.upgrades.width.step * S.up.width;
+const playerSpeed = S => S.cfg.player.speed * toolDef(S).speedMult * (1 + S.cfg.upgrades.speed.step * S.up.speed);
+const payoutMult = S => 1 + S.cfg.upgrades.payout.step * S.up.payout;
+const panelMult = S => 1 + S.cfg.upgrades.panelBoost.step * S.up.panelBoost;
+const nextGate = S => S.unlocked.indexOf(false);
+const gateCost = (S, k) => S.cfg.grid.sectorGateCost[k];
+const canLaunch = S => S.fuel >= S.cfg.refinery.tankKg - 1e-9 && S.litCount >= S.cfg.refinery.launchMinLit * SWEEPABLE;
+function costOf(S, id) {
+  const U = S.cfg.upgrades;
+  if (UPS.includes(id)) { if (id === 'width' && S.up.width >= U.width.max) return null; return U[id].base * Math.pow(U.growth, S.up[id]); }
+  if (id === 'tool') { const t = S.cfg.tools[S.tool + 1]; return t ? t.cost : null; }
+  if (id === 'keeper') return S.crewOpen && S.keepers.length < S.cfg.keeper.max ? S.cfg.keeper.cost[S.keepers.length] : null;
+  return null;
+}
+const canBuy = (S, id) => { const c = costOf(S, id); return c != null && S.cash >= c; };
+function buy(S, id) {
+  if (!canBuy(S, id)) return false;
+  S.cash -= costOf(S, id); S.spent++;
+  if (S.tele.firstUpgrade == null) S.tele.firstUpgrade = S.t;
+  if (UPS.includes(id)) S.up[id]++;
+  else if (id === 'tool') { S.tool++; S.tele.tierAt[S.tool] = S.t; fxConfetti(S); sfx(S, 'tool'); }
+  else if (id === 'keeper') { S.keepers.push({ x: DEPOT_C.x, y: DEPOT_C.y - 1, target: -1, work: 0, sector: -1, id: S.keepers.length }); S.tele.keeperAt[S.keepers.length] = S.t; sfx(S, 'keeper'); }
+  return true;
+}
+function unlockGate(S, k) {
+  if (k <= 0 || S.cash < gateCost(S, k)) return false;
+  S.cash -= gateCost(S, k); S.unlocked[k] = true; S.tele.gateAt[k] = S.t; sfx(S, 'gate');
+  addText(S, PADS[k].c + 1, PADS[k].r, 'Sector ' + (k + 1) + ' open!', '#FFD45E');
+  return true;
+}
+function sell(S) {
+  if (S.can <= 0) return;
+  const kg = S.can, room = Math.max(0, S.cfg.refinery.tankKg - S.fuel), fuelKg = Math.min(kg * S.fuelShare, room);
+  S.can = 0; S.fuel += fuelKg;
+  const cash = (kg - fuelKg) * S.cfg.dust.pricePerKg * payoutMult(S);
+  S.cash += cash; S.earned += cash; bin(S).sell += cash;
+  if (S.tele.firstSell == null) S.tele.firstSell = S.t;
+  addText(S, DEPOT_C.x, DEPOT.r - 0.5, '+$' + fmt(cash) + (fuelKg > 0 ? '  +' + fuelKg.toFixed(1) + ' Fuel' : ''), '#FFD45E');
+  sfx(S, 'sell');
+}
+function launch(S) {
+  const litPct = 100 * S.litCount / SWEEPABLE, sd = Math.floor(litPct * S.cfg.launch.stardustPerLitPct);
+  S.stardust += sd; S.launches++; if (S.tele.launchAt == null) S.tele.launchAt = S.t;
+  return { stardust: sd, litPct, t: S.t };
+}
+function skipOffline(S, minutes) {
+  const cfg = S.cfg, m = Math.min(minutes, cfg.offline.capMin);
+  const stormPerMin = cfg.storm.litFraction * S.litCount * 60 / cfg.storm.intervalSec;
+  const keeperPerMin = S.keepers.length * 60 / cfg.keeper.secPerPass * cfg.offline.keeperTravelFactor;
+  const up = S.keepers.length ? Math.min(1, stormPerMin > 0 ? keeperPerMin / stormPerMin : 1) : cfg.offline.noKeeperUptime;
+  S.popup = { kind: 'offline', cash: S.rate * 60 * m * up, up, m };
+}
+
+// ===== state =====
+function newGame(cfg, keep = {}) {
+  const S = {
+    cfg, t: 0, rng: mulberry32((keep.seed ?? cfg.seed) * 9973 + 1), headless: !!keep.headless,
+    cash: 0, earned: 0, spent: 0, can: 0, fuel: 0, fuelShare: cfg.refinery.defaultFuelShare, stardust: keep.stardust || 0, launches: keep.launches || 0,
+    tool: keep.tool || 0, up: { capacity: 0, width: 0, speed: 0, payout: 0, panelBoost: 0 },
+    dirt: new Float32Array(N), ever: new Uint8Array(N), foot: new Int32Array(N), footId: 1, popAt: new Float32Array(N).fill(-9), shineUntil: new Float32Array(N), stormAt: new Float32Array(N).fill(-9),
+    linked: new Uint8Array(N), dist: new Int16Array(N), par: new Int32Array(N).fill(-1), q: new Int32Array(N),
+    unlocked: [true, false, false, false, false, false], litCount: 0, everCount: 0, stormed: 0, linkedCount: 0, rate: 0, linkT: 0,
+    player: { x: DEPOT.c - 1.5, y: DEPOT.r + 2, tc: -1, tr: -1, face: -Math.PI / 2, moving: false },
+    keepers: [], crewOpen: false, storm: { phase: 'idle', next: cfg.storm.firstStormAtSec, count: 0, targets: [], ti: 0, front: 0, dir: 1, r0: 0 },
+    chain: 0, lastLitT: -9, lastTone: -9, blocked: -9, milestone: 0, zoomAt: -99, fx: [], popup: null, sfxFn: null,
+    tele: { firstUpgrade: null, firstLit: null, firstSell: null, tierAt: {}, keeperAt: {}, gateAt: {}, launchAt: null, min: [], upK3: [0, 0], upK0: [0, 0], storms: 0 },
+    ftue: { done: {}, shownAt: {} },
+  };
+  for (let i = 0; i < N; i++) S.dirt[i] = KIND[i] ? 0 : 1;
+  S.player.tc = Math.floor(S.player.x); S.player.tr = Math.floor(S.player.y);
+  return S;
+}
+function bin(S) {
+  const m = Math.floor(S.t / 60), L = S.tele.min;
+  while (L.length <= m) {
+    if (L.length) Object.assign(L[L.length - 1], snap(S));
+    L.push({ lit: 0, sell: 0, up: 0, w: 0 });
+  }
+  return L[m];
+}
+const snap = S => ({ litTiles: S.litCount, moon: +(100 * S.everCount / SWEEPABLE).toFixed(1), keepers: S.keepers.length, tool: S.tool, cash: Math.round(S.cash), rate: +S.rate.toFixed(2) });
+
+// ===== simulation =====
+const addText = (S, x, y, text, col) => { if (!S.headless) S.fx.push({ type: 'text', x, y, text, col, life: 1.3 }); };
+function fxConfetti(S) { if (S.headless) return; for (let i = 0; i < 24; i++) { const a = S.rng() * Math.PI * 2, v = 2 + S.rng() * 4; S.fx.push({ type: 'dot', x: S.player.x, y: S.player.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.9, col: ['#3EE6FF', '#FFD45E', '#FF9F43', '#fff'][i % 4] }); } }
+const sfx = (S, kind, n) => { if (S.sfxFn) S.sfxFn(kind, n); };
+
+function onLit(S, i, byKeeper) {
+  if (!S.ever[i]) { S.ever[i] = 1; S.everCount++; } else S.stormed--;
+  S.litCount++; S.popAt[i] = S.t;
+  const td = toolDef(S); if (td.shineSec && !byKeeper) S.shineUntil[i] = S.t + td.shineSec;
+  S.chain = S.t - S.lastLitT < S.cfg.feel.toneWindowSec ? Math.min(S.chain + 1, S.cfg.feel.toneMax - 1) : 0; S.lastLitT = S.t;
+  if (S.tele.firstLit == null) S.tele.firstLit = S.t;
+  if (!S.headless) {
+    if (S.t - S.lastTone > 0.06) { S.lastTone = S.t; sfx(S, 'lit', S.chain); }
+    if (S.litCount <= 10 || S.litCount % 40 === 0) addText(S, i % C + 0.5, ((i / C) | 0), '+$' + (S.cfg.lit.powerPerTile * S.cfg.lit.gridLinkMult * panelMult(S)).toFixed(2) + '/s', '#3EE6FF');
+    const ms = Math.floor(100 * S.everCount / SWEEPABLE / S.cfg.feel.milestonePct);
+    if (ms > S.milestone) { S.milestone = ms; S.zoomAt = S.t; }
+  }
+}
+function passTile(S, i, amt, collect) {
+  if (KIND[i] || S.dirt[i] <= 0 || !S.unlocked[SEC[i]]) return 0;
+  let d = Math.min(S.dirt[i], amt);
+  if (collect) {
+    const room = capKg(S) - S.can;
+    if (room <= 1e-9) { S.blocked = S.t; return 0; }
+    d = Math.min(d, room / S.cfg.dust.kgPerTile); S.can += d * S.cfg.dust.kgPerTile;
+  }
+  S.dirt[i] -= d;
+  if (S.dirt[i] <= 1e-6) { S.dirt[i] = 0; onLit(S, i, !collect); }
+  return d;
+}
+// A pass is applied to every tile that ENTERS the tool footprint (w x w square, + suction ring for the Vacuum Pack).
+function sweepAt(S, c, r) {
+  const td = toolDef(S), w = toolWidth(S), sr = td.suctionRadius || 0, o = -Math.floor((w - 1) / 2), id = ++S.footId, amt = 1 / td.passes;
+  for (let dy = o - sr; dy < o + w + sr; dy++) for (let dx = o - sr; dx < o + w + sr; dx++) {
+    const cc = c + dx, rr = r + dy; if (cc < 0 || rr < 0 || cc >= C || rr >= R) continue;
+    const i = rr * C + cc, ring = dy < o || dy >= o + w || dx < o || dx >= o + w;
+    if (S.foot[i] !== id - 1) passTile(S, i, ring ? (S.ever[i] ? 1 : amt * 0.5) : amt, true);
+    S.foot[i] = id;
+  }
+}
+function walkable(S, x, y) {
+  if (x < 0.25 || y < 0.25 || x > C - 0.25 || y > R - 0.25) return false;
+  return S.unlocked[SEC[Math.floor(y) * C + Math.floor(x)]];
+}
+function movePlayer(S, ix, iy, dt) {
+  const p = S.player, len = Math.hypot(ix, iy); p.moving = len > 0.01;
+  if (!p.moving) return;
+  if (len > 1) { ix /= len; iy /= len; }
+  const sp = playerSpeed(S) * dt;
+  if (walkable(S, p.x + ix * sp, p.y)) p.x += ix * sp;
+  if (walkable(S, p.x, p.y + iy * sp)) p.y += iy * sp;
+  p.face = Math.atan2(iy, ix);
+  const tc = Math.floor(p.x), tr = Math.floor(p.y);
+  if (tc !== p.tc || tr !== p.tr) { p.tc = tc; p.tr = tr; sweepAt(S, tc, tr); }
+}
+function recalcLinks(S) {
+  const L = S.linked, q = S.q; L.fill(0); let h = 0, t = 0;
+  for (let i = 0; i < N; i++) if (KIND[i]) { L[i] = 1; S.dist[i] = 0; S.par[i] = -1; q[t++] = i; }
+  while (h < t) {
+    const i = q[h++], c = i % C;
+    for (let k = 0; k < 4; k++) {
+      const j = k === 0 ? (c > 0 ? i - 1 : -1) : k === 1 ? (c < C - 1 ? i + 1 : -1) : k === 2 ? i - C : i + C;
+      if (j < 0 || j >= N || L[j] || KIND[j] || S.dirt[j] !== 0 || !S.ever[j]) continue;
+      L[j] = 1; S.dist[j] = S.dist[i] + 1; S.par[j] = i; q[t++] = j;
+    }
+  }
+  const lit = S.cfg.lit, shine = S.cfg.tools[2] ? S.cfg.tools[2].shineMult || 1 : 1;
+  let sum = 0, linkedN = 0;
+  for (let i = 0; i < N; i++) if (!KIND[i] && S.dirt[i] === 0 && S.ever[i]) {
+    const m = (L[i] ? lit.gridLinkMult : 1) * (S.shineUntil[i] > S.t ? shine : 1); sum += m; if (L[i]) linkedN++;
+  }
+  S.linkedCount = linkedN; S.rate = sum * lit.powerPerTile * panelMult(S);
+}
+function stepStorm(S, dt) {
+  const st = S.storm, cfg = S.cfg.storm;
+  if (st.phase === 'idle' && S.t >= st.next - cfg.warningSec) {
+    if (S.litCount < 4) { st.next += 10; return; }
+    const lits = []; for (let i = 0; i < N; i++) if (!KIND[i] && S.dirt[i] === 0 && S.ever[i]) lits.push(i);
+    let row = -1, far = -1; // band centred on the farthest of `samples` random Lit tiles: storms hit where the player is not
+    for (let k = 0; k < Math.max(1, cfg.samples || 1); k++) { const i = lits[Math.floor(S.rng() * lits.length)], d = Math.abs(((i / C) | 0) - S.player.y); if (d > far) { far = d; row = (i / C) | 0; } }
+    st.r0 = clamp(row - (cfg.bandRows >> 1), 0, R - cfg.bandRows); st.dir = S.rng() < 0.5 ? 1 : -1; st.phase = 'warn'; st.blowAt = st.next;
+    sfx(S, 'warn');
+  }
+  if (st.phase === 'warn' && S.t >= st.blowAt) {
+    const band = []; for (let r = st.r0; r < st.r0 + cfg.bandRows; r++) for (let c = 0; c < C; c++) { const i = r * C + c; if (!KIND[i] && S.dirt[i] === 0 && S.ever[i]) band.push(i); }
+    for (let k = band.length - 1; k > 0; k--) { const j = Math.floor(S.rng() * (k + 1)); [band[k], band[j]] = [band[j], band[k]]; }
+    const n = st.count === 0 ? cfg.firstStormTiles : Math.round(cfg.litFraction * S.litCount);
+    st.targets = band.slice(0, n).sort((a, b) => st.dir * (a % C - b % C)); st.ti = 0;
+    st.front = st.dir > 0 ? -2 : C + 2; st.phase = 'blow';
+  }
+  if (st.phase === 'blow') {
+    st.front += st.dir * (C + 4) / cfg.frontSec * dt;
+    while (st.ti < st.targets.length && (st.dir > 0 ? st.targets[st.ti] % C <= st.front : st.targets[st.ti] % C >= st.front)) {
+      const i = st.targets[st.ti++];
+      if (S.dirt[i] === 0 && S.ever[i]) { S.dirt[i] = cfg.dirtAfter; S.litCount--; S.stormed++; S.stormAt[i] = S.t; }
+    }
+    if (st.dir > 0 ? st.front > C + 2 : st.front < -2) {
+      st.phase = 'idle'; st.count++; S.tele.storms++; st.next = st.blowAt + cfg.intervalSec; S.crewOpen = true;
+    }
+  }
+}
+function pickKeeperTarget(S, k) {
+  const claimed = new Set(S.keepers.filter(o => o !== k && o.target >= 0).map(o => o.target)), per = [0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < N; i++) if (S.ever[i] && S.dirt[i] > 0 && !claimed.has(i)) per[SEC[i]]++;
+  let sec = -1, best = 0; for (let s = 0; s < 6; s++) if (per[s] > best) { best = per[s]; sec = s; }
+  if (k.sector >= 0 && per[k.sector] > 0) sec = k.sector; // stay on the assigned sector until it is clean (no cross-map flights)
+  k.sector = sec; if (sec < 0) return -1;
+  let bi = -1, bd = 1e9;
+  for (let i = 0; i < N; i++) if (SEC[i] === sec && S.ever[i] && S.dirt[i] > 0 && !claimed.has(i)) { const d = Math.abs(i % C + 0.5 - k.x) + Math.abs(((i / C) | 0) + 0.5 - k.y); if (d < bd) { bd = d; bi = i; } }
+  return bi;
+}
+function stepKeepers(S, dt) {
+  const kc = S.cfg.keeper;
+  for (const k of S.keepers) {
+    if (k.target >= 0 && S.dirt[k.target] <= 0) { k.target = -1; k.retry = 0; } // done: pick the next one now
+    if (k.target < 0) { k.work = 0; k.retry = (k.retry || 0) - dt; if (k.retry <= 0) { k.target = pickKeeperTarget(S, k); k.retry = k.target < 0 ? 0.5 : 0; } }
+    const tx = k.target >= 0 ? k.target % C + 0.5 : DEPOT_C.x + Math.cos(S.t * 0.7 + k.id * 1.05) * 3, ty = k.target >= 0 ? ((k.target / C) | 0) + 0.5 : DEPOT.r - 1.5 + Math.sin(S.t * 0.7 + k.id * 1.05) * 1.2;
+    const dx = tx - k.x, dy = ty - k.y, d = Math.hypot(dx, dy), s = kc.speed * dt;
+    if (d > s) { k.x += dx / d * s; k.y += dy / d * s; k.working = false; }
+    else { k.x = tx; k.y = ty; if (k.target >= 0) { k.working = true; k.work += dt; if (k.work >= kc.secPerPass) { k.work = 0; passTile(S, k.target, kc.passPower, false); } } }
+  }
+}
+function step(S, dt, input) {
+  S.t += dt;
+  if (input) movePlayer(S, input.x, input.y, dt); else S.player.moving = false;
+  const p = S.player;
+  if (inRectT(p.x, p.y, DEPOT)) sell(S);
+  const g = nextGate(S); if (g > 0 && inRectT(p.x, p.y, PADS[g])) unlockGate(S, g);
+  const b = bin(S), inc = S.rate * dt; S.cash += inc; S.earned += inc; b.lit += inc;
+  if ((S.linkT -= dt) <= 0) { S.linkT = S.cfg.lit.linkRecalcSec; recalcLinks(S); }
+  stepStorm(S, dt); stepKeepers(S, dt);
+  if (S.everCount > 0) {
+    const up = S.litCount / S.everCount; b.up += up * dt; b.w += dt;
+    if (S.storm.count > 0) { const u = S.keepers.length >= 3 ? S.tele.upK3 : S.keepers.length === 0 ? S.tele.upK0 : null; if (u) { u[0] += up * dt; u[1] += dt; } }
+  }
+  if (!S.headless) {
+    for (const f of S.fx) { f.life -= dt; if (f.type === 'dot') { f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= 0.94; f.vy *= 0.94; } else f.y -= 1.2 * dt; }
+    S.fx = S.fx.filter(f => f.life > 0);
+  }
+}
+
+// ===== bot (headless) =====
+// reclean: bot also targets storm-dusted tiles. keepers: how many Keepers it will hire. idleAfter: minutes after which the bot stops playing (passive test).
+function nearestDirty(S, reclean) {
+  const p = S.player, here = p.tr * C + p.tc; let bi = -1, bd = 1e9;
+  for (let i = 0; i < N; i++) {
+    if (KIND[i] || S.dirt[i] <= 0 || !S.unlocked[SEC[i]] || S.foot[i] === S.footId || i === here || (!reclean && S.ever[i])) continue;
+    const c = i % C, r = (i / C) | 0, near = Math.abs(c + 0.5 - p.x) + Math.abs(r + 0.5 - p.y);
+    if (reclean === 'near' && S.ever[i] && near > 6) continue; // human model: re-sweeps storm tiles only when they are close
+    const d = near + 0.15 * (Math.abs(c - DEPOT_C.x) + Math.abs(r - DEPOT_C.y));
+    if (d < bd) { bd = d; bi = i; }
+  }
+  return bi;
+}
+function unlockedClean(S) { let n = 0, e = 0; for (let i = 0; i < N; i++) if (!KIND[i] && S.unlocked[SEC[i]]) { n++; if (S.ever[i]) e++; } return e / Math.max(1, n); }
+function botMove(S, B) {
+  const p = S.player;
+  if (S.can >= capKg(S) - 1e-6 || S.t - S.blocked < 0.3) { B.tile = -1; return toward(p, DEPOT_C.x, DEPOT_C.y); }
+  const g = nextGate(S);
+  if (g > 0 && S.cash >= gateCost(S, g) && (B.cleanFrac >= 0.85 || B.noDirty)) return toward(p, PADS[g].c + 1, PADS[g].r + 1);
+  if (B.tile < 0 || S.dirt[B.tile] <= 0 || (Math.floor(p.x) === B.tile % C && Math.floor(p.y) === ((B.tile / C) | 0))) {
+    B.tile = nearestDirty(S, B.reclean); if (B.tile < 0 && B.reclean === 'near') B.tile = nearestDirty(S, true);
+    B.noDirty = B.tile < 0;
+  }
+  if (B.tile < 0) return null;
+  return toward(p, B.tile % C + 0.5, ((B.tile / C) | 0) + 0.5);
+}
+function toward(p, x, y) { const dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy); return d < 0.05 ? null : { x: dx / d, y: dy / d }; }
+function botBuy(S, B) {
+  B.cleanFrac = unlockedClean(S);
+  if (canLaunch(S)) return 'launch';
+  for (let guard = 0; guard < 30; guard++) {
+    if (S.keepers.length < B.keepers && canBuy(S, 'keeper') && costOf(S, 'keeper') <= S.cash * 0.6) { buy(S, 'keeper'); continue; }
+    if (canBuy(S, 'tool')) { buy(S, 'tool'); continue; }
+    const g = nextGate(S), save = Math.min(costOf(S, 'tool') ?? 1e12, g > 0 && B.cleanFrac >= 0.6 ? gateCost(S, g) : 1e12);
+    const ups = UPS.filter(id => canBuy(S, id)).sort((a, b) => costOf(S, a) - costOf(S, b));
+    if (!ups.length) break;
+    const c = costOf(S, ups[0]);
+    if (save < 1e12 && S.cash - c < save && c > save * B.upgradeShare) break;
+    if (c > S.cash * 0.5) break;
+    buy(S, ups[0]);
+  }
+  return null;
+}
+function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true } = {}) {
+  const cfg = deepMerge(clone(CONFIG), overrides); cfg.seed = seed;
+  const S = newGame(cfg, { headless: true, seed });
+  const B = { tile: -1, keepers, reclean, upgradeShare, cleanFrac: 0, noDirty: false, think: 0 };
+  let launchInfo = null, idleUp = [0, 0];
+  while (S.t < minutes * 60) {
+    const idle = idleAfter != null && S.t >= idleAfter * 60;
+    const mv = idle ? null : botMove(S, B); // eff < 1: human model (imperfect paths, overlap, thumb not at full tilt)
+    step(S, dt, mv && { x: mv.x * eff, y: mv.y * eff });
+    if (idle && S.everCount) { idleUp[0] += S.litCount / S.everCount * dt; idleUp[1] += dt; }
+    if ((B.think -= dt) <= 0 && !idle) { B.think = 1; if (botBuy(S, B) === 'launch') { launchInfo = launch(S); if (stopAtLaunch) break; } }
+  }
+  bin(S); return Object.assign(teleSummary(S), { seed, eff, keepersMax: keepers, reclean, idleAfter, idleUptime: idleUp[1] ? +(100 * idleUp[0] / idleUp[1]).toFixed(1) : null, launch: launchInfo });
+}
+function teleSummary(S) {
+  const T = S.tele, mins = T.min.map((m, i) => Object.assign({ m: i + 1, lit: Math.round(m.lit), sell: Math.round(m.sell), up: m.w ? Math.round(100 * m.up / m.w) : null }, i < T.min.length - 1 ? {} : snap(S), m.litTiles != null ? { litTiles: m.litTiles, moon: m.moon, keepers: m.keepers, tool: m.tool, rate: m.rate } : {}));
+  const full = mins.filter((m, i) => i < mins.length - 1);
+  // GB2: first minute where Lit income beats dust sales on a 3-minute rolling window (smooths Depot trip timing), and keeps beating it the next minute
+  const roll = (i, k) => full.slice(Math.max(0, i - 1), i + 2).reduce((a, m) => a + m[k], 0), beats = i => i >= full.length || roll(i, 'lit') > roll(i, 'sell');
+  let cross = null; for (let i = 0; i < full.length; i++) if (beats(i) && beats(i + 1)) { cross = full[i].m; break; }
+  return {
+    t: Math.round(S.t), firstLit: T.firstLit, firstUpgrade: T.firstUpgrade, keeper1: T.keeperAt[1], keeper3: T.keeperAt[3], tier2: T.tierAt[1], tier3: T.tierAt[2], tier4: T.tierAt[3], tier5: T.tierAt[4],
+    gates: Object.assign({}, T.gateAt), launchAt: T.launchAt, litBeatsSellMin: cross, storms: T.storms,
+    uptimeK3: T.upK3[1] ? +(100 * T.upK3[0] / T.upK3[1]).toFixed(1) : null, uptimeK0: T.upK0[1] ? +(100 * T.upK0[0] / T.upK0[1]).toFixed(1) : null,
+    up: Object.assign({}, S.up), moon: +(100 * S.everCount / SWEEPABLE).toFixed(1), lit: +(100 * S.litCount / SWEEPABLE).toFixed(1), fuel: Math.round(S.fuel), cash: Math.round(S.cash), minutes: mins,
+  };
+}
+// GB1-GB4 in one call. active = plays normally, hires up to 6 Keepers; noKeeper = same player, never hires;
+// passive = active until minute 12, then idle for 15 minutes (with vs without Keepers).
+function botReport(seeds = [1, 2, 3], overrides = {}) {
+  const act = seeds.map(seed => runBot({ seed, overrides })), nok = seeds.map(seed => runBot({ seed, keepers: 0, overrides }));
+  const pasK = seeds.map(seed => runBot({ seed, idleAfter: 12, minutes: 27, keepers: 3, overrides, stopAtLaunch: false })), pas0 = seeds.map(seed => runBot({ seed, idleAfter: 12, minutes: 27, keepers: 0, overrides, stopAtLaunch: false }));
+  const avg = a => a.filter(v => v != null).length ? +(a.filter(v => v != null).reduce((x, y) => x + y, 0) / a.filter(v => v != null).length).toFixed(1) : null;
+  return {
+    GB1_firstUpgradeSec: act.map(r => r.firstUpgrade && +r.firstUpgrade.toFixed(1)),
+    GB2_litBeatsSellMin: act.map(r => r.litBeatsSellMin),
+    GB3_launchMin: act.map(r => r.launchAt && +(r.launchAt / 60).toFixed(1)),
+    GB4_uptime3Keepers: act.map(r => r.uptimeK3), GB4_uptimeNoKeeper: nok.map(r => r.uptimeK0),
+    passiveIdleUptime3K: pasK.map(r => r.idleUptime), passiveIdleUptime0K: pas0.map(r => r.idleUptime),
+    noKeeperLaunchMin: nok.map(r => r.launchAt && +(r.launchAt / 60).toFixed(1)),
+    milestones: act.map(r => ({ keeper1: mmss(r.keeper1), tier2: mmss(r.tier2), tier3: mmss(r.tier3), tier4: mmss(r.tier4), tier5: mmss(r.tier5), gates: Object.fromEntries(Object.entries(r.gates).map(([k, v]) => [k, mmss(v)])) })),
+    avg: { launchMin: avg(act.map(r => r.launchAt && r.launchAt / 60)), uptimeK3: avg(act.map(r => r.uptimeK3)), uptimeK0: avg(nok.map(r => r.uptimeK0)) },
+    runs: { act, nok },
+  };
+}
+function selfTest() {
+  const out = {};
+  const a = runBot({ minutes: 5, seed: 4 }), b = runBot({ minutes: 5, seed: 4 });
+  out.deterministic = a.cash === b.cash && a.moon === b.moon;
+  // accounting + rules during an 8-minute bot run, checked every second
+  const cfg = clone(CONFIG), S = newGame(cfg, { headless: true, seed: 2 }), B = { tile: -1, keepers: 6, reclean: 'near', upgradeShare: 0.2, cleanFrac: 0, think: 0 };
+  let ok = { counts: true, canister: true, locked: true, cash: true };
+  for (let i = 0; i < 9600; i++) {
+    step(S, 0.05, botMove(S, B)); if ((B.think -= 0.05) <= 0) { B.think = 1; botBuy(S, B); }
+    if (i % 20 === 0) {
+      let lit = 0, ever = 0, st = 0; for (let j = 0; j < N; j++) if (!KIND[j]) { if (S.ever[j]) { ever++; if (S.dirt[j] === 0) lit++; else st++; } }
+      if (lit !== S.litCount || ever !== S.everCount || st !== S.stormed) ok.counts = false;
+      if (S.can > capKg(S) + 1e-6) ok.canister = false;
+      if (!S.unlocked[SEC[Math.floor(S.player.y) * C + Math.floor(S.player.x)]]) ok.locked = false;
+      if (!(S.cash >= 0) || !isFinite(S.cash)) ok.cash = false;
+    }
+  }
+  Object.assign(out, ok);
+  out.stormHappened = S.tele.storms >= 2;
+  // a toothbrush tile needs exactly 3 passes; a storm tile drops to dirtAfter; a Keeper re-lights it
+  const T = newGame(clone(CONFIG), { headless: true }); const i0 = 60 * C + 5;
+  passTile(T, i0, 1 / 3, true); passTile(T, i0, 1 / 3, true); const before = T.dirt[i0] > 0; passTile(T, i0, 1 / 3, true);
+  out.threePasses = before && T.dirt[i0] === 0 && T.litCount === 1;
+  T.dirt[i0] = CONFIG.storm.dirtAfter; T.litCount--; T.stormed++; T.crewOpen = true; buy(T, 'keeper');
+  for (let k = 0; k < 400 && T.dirt[i0] > 0; k++) step(T, 0.05, null);
+  out.keeperRelights = T.dirt[i0] === 0 && T.stormed === 0;
+  out.lockedSectorUnsweepable = passTile(T, 10 * C + 5, 1, true) === 0;
+  // launch resets planet but keeps tool + stardust
+  T.tool = 3; T.fuel = CONFIG.refinery.tankKg; const r = launch(T); const U = newGame(clone(CONFIG), { tool: T.tool, stardust: T.stardust, headless: true });
+  out.launchKeepsTool = U.tool === 3 && U.cash === 0 && U.litCount === 0 && U.stardust === r.stardust;
+  for (const [k, v] of Object.entries(out)) console.assert(v, 'selfTest failed: ' + k);
+  out.pass = Object.values(out).every(v => v === true);
+  return out;
+}
+globalThis.SP = { CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
+
+// ===== browser only below =====
+if (typeof document !== 'undefined') {
+const cv = document.getElementById('c'); const ctx = cv.getContext('2d');
+let scale = 1;
+function resize() {
+  scale = Math.min(innerWidth / W, innerHeight / H); const dpr = window.devicePixelRatio || 1;
+  cv.style.width = W * scale + 'px'; cv.style.height = H * scale + 'px';
+  cv.width = Math.round(W * scale * dpr); cv.height = Math.round(H * scale * dpr);
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+// ----- audio (WebAudio beeps only; starts on first touch) -----
+let AC = null, soundOn = true;
+function tone(f, dur = 0.08, type = 'sine', vol = 0.06, delay = 0) {
+  if (!AC || !soundOn) return;
+  const t0 = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t0); g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g).connect(AC.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function playSfx(kind, n) {
+  if (kind === 'lit') tone(523.25 * Math.pow(2, (n || 0) * 2 / 12), 0.09, 'triangle', 0.07); // whole-tone steps up while tiles chain within 1 s
+  else if (kind === 'sell') { tone(196, 0.12, 'square', 0.03); tone(294, 0.12, 'square', 0.03, 0.07); }
+  else if (kind === 'warn') { tone(110, 0.5, 'sawtooth', 0.025); tone(98, 0.5, 'sawtooth', 0.025, 0.5); }
+  else if (kind === 'gate') [523, 659, 784].forEach((f, i) => tone(f, 0.18, 'triangle', 0.05, i * 0.08));
+  else if (kind === 'tool') [392, 523, 659, 1046].forEach((f, i) => tone(f, 0.16, 'triangle', 0.05, i * 0.07));
+  else if (kind === 'keeper') { tone(880, 0.1, 'sine', 0.05); tone(1320, 0.12, 'sine', 0.04, 0.08); }
+}
+
+// ----- input -----
+const keys = {}; let joy = null;
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if (e.key === 't' || e.key === 'T') document.getElementById('btnPanel').click(); });
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+function inputVec() {
+  let x = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0), y = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+  if (joy) { const dx = joy.x - joy.ox, dy = joy.y - joy.oy, d = Math.hypot(dx, dy); if (d > 6) { x = dx / Math.max(d, 40); y = dy / Math.max(d, 40); } }
+  return x || y ? { x, y } : null;
+}
+const toLocal = e => { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; };
+const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+const BTN = ['capacity', 'width', 'speed', 'payout', 'panelBoost', 'tool', 'keeper', 'fuel'].map((id, i) => ({ id, x: 6 + (i % 4) * 95.5, y: BAR_Y + 8 + Math.floor(i / 4) * 58, w: 91, h: 52 }));
+const LAUNCH_BTN = { x: 105, y: BAR_Y - 64, w: 180, h: 50 };
+const POP_BTN = [{ x: 60, y: 450, w: 130, h: 56 }, { x: 200, y: 450, w: 130, h: 56 }];
+const FUEL_STEPS = [0, 0.3, 0.5, 0.7, 1];
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch { AC = null; } }
+  const p = toLocal(e);
+  if (G.popup) {
+    if (G.popup.kind === 'launch') { G = startGame({ tool: G.tool, stardust: G.stardust, launches: G.launches }); return; }
+    if (inRect(p, POP_BTN[0]) || inRect(p, POP_BTN[1])) { const m = inRect(p, POP_BTN[1]) ? 2 : 1; G.cash += G.popup.cash * m; G.earned += G.popup.cash * m; G.popup = null; }
+    return;
+  }
+  if (canLaunch(G) && inRect(p, LAUNCH_BTN)) { G.popup = Object.assign({ kind: 'launch' }, launch(G)); return; }
+  for (const b of BTN) if (inRect(p, b)) {
+    if (b.id === 'fuel') { G.fuelShare = FUEL_STEPS[(FUEL_STEPS.indexOf(G.fuelShare) + 1) % FUEL_STEPS.length]; }
+    else buy(G, b.id);
+    return;
+  }
+  if (p.y > HUD_H && p.y < BAR_Y) { joy = { ox: p.x, oy: p.y, x: p.x, y: p.y, id: e.pointerId }; cv.setPointerCapture(e.pointerId); }
+});
+cv.addEventListener('pointermove', e => { if (joy && e.pointerId === joy.id) { const p = toLocal(e); joy.x = p.x; joy.y = p.y; } });
+const endJoy = e => { if (joy && e.pointerId === joy.id) joy = null; };
+cv.addEventListener('pointerup', endJoy); cv.addEventListener('pointercancel', endJoy);
+
+// ----- rendering -----
+const COL = { dust: '#8A8D93', dotD: '#6c6f75', dotL: '#a6a9ae', bare: '#2b3038', lit: '#3EE6FF', litUnl: '#25a6bd', panel: '#1aa0b8', stormBase: '#1f5664', space: '#0e1014', planet: '#5b5e64', crater: '#4a4d52' };
+const PLANET_R = Math.hypot(C, R) / 2 + 2;
+const Z_PLANET = (W - 20) / (2 * PLANET_R);
+const CRATERS = [[-30, -20, 6], [28, 30, 8], [-26, 28, 5], [30, -32, 4], [0, -40, 3], [-38, 4, 3], [36, 2, 4], [10, 40, 3]];
+function camera(S) {
+  const f = S.cfg.feel, base = 16 * clamp(1 - 0.06 * (toolWidth(S) - 1), 0.7, 1);
+  let k = 0;
+  if (S.t < f.introSec) k = S.t < 1.2 ? 1 : 1 - ease(clamp((S.t - 1.2) / (f.introSec - 1.2), 0, 1));
+  const za = S.t - S.zoomAt;
+  if (za >= 0 && za < f.zoomOutSec) k = Math.max(k, za < 0.5 ? ease(za / 0.5) : za > f.zoomOutSec - 0.5 ? ease((f.zoomOutSec - za) / 0.5) : 1);
+  const z = Math.exp(lerp(Math.log(base), Math.log(Z_PLANET), k));
+  let cx = S.player.x, cy = S.player.y;
+  if (k < 0.01) { const hw = W / 2 / z, hh = (BAR_Y - HUD_H) / 2 / z; cx = clamp(cx, hw - 2, C - hw + 2); cy = clamp(cy, hh - 2, R - hh + 2); }
+  return { z, k, cx: lerp(cx, C / 2, k), cy: lerp(cy, R / 2, k) };
+}
+let shakeT = 0;
+function render(S) {
+  const cam = camera(S), z = cam.z, st = S.storm;
+  ctx.fillStyle = COL.space; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.beginPath(); ctx.rect(0, HUD_H, W, BAR_Y - HUD_H); ctx.clip();
+  if (st.phase === 'blow' && st.front > -2 && st.front < C + 2) shakeT = 0.15;
+  const sh = shakeT * shakeT * 6; shakeT = Math.max(0, shakeT - 0.02);
+  const ox = W / 2 - cam.cx * z + (Math.random() - 0.5) * sh, oy = VIEW_CY - cam.cy * z + (Math.random() - 0.5) * sh;
+  const X = c => ox + c * z, Y = r => oy + r * z;
+  if (cam.k > 0.05) { // planet disk behind the sweepable map (Toothbrush vs Planet)
+    ctx.fillStyle = COL.planet; ctx.beginPath(); ctx.arc(X(C / 2), Y(R / 2), PLANET_R * z, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = COL.crater; ctx.lineWidth = Math.max(1, z * 0.4);
+    for (const [cx, cy, cr] of CRATERS) { ctx.beginPath(); ctx.arc(X(C / 2 + cx), Y(R / 2 + cy), cr * z, 0, Math.PI * 2); ctx.stroke(); }
+  }
+  const c0 = Math.max(0, Math.floor(-ox / z)), c1 = Math.min(C - 1, Math.ceil((W - ox) / z)), r0 = Math.max(0, Math.floor((HUD_H - oy) / z)), r1 = Math.min(R - 1, Math.ceil((BAR_Y - oy) / z));
+  const detail = z >= 9, ts = z + 0.5, flowT = S.t * 10;
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    const i = r * C + c; if (KIND[i]) continue;
+    const x = X(c), y = Y(r), d = S.dirt[i];
+    if (d === 0) {
+      const age = S.t - S.popAt[i];
+      if (age < S.cfg.feel.popSec) { // pop 1.0 -> 1.08 -> 1.0 + white flash
+        const s = 1 + S.cfg.feel.popScale * Math.sin(Math.PI * age / S.cfg.feel.popSec), e = (s - 1) * z / 2;
+        ctx.fillStyle = COL.lit; ctx.fillRect(x - e, y - e, z * s + 0.5, z * s + 0.5);
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.7 * (1 - age / S.cfg.feel.popSec)).toFixed(2) + ')'; ctx.fillRect(x - e, y - e, z * s, z * s); continue;
+      }
+      ctx.fillStyle = S.linked[i] ? COL.lit : COL.litUnl; ctx.fillRect(x, y, ts, ts);
+      if (detail) {
+        ctx.fillStyle = COL.panel; ctx.fillRect(x + z / 2 - 0.5, y + 1, 1, z - 2); ctx.fillRect(x + 1, y + z / 2 - 0.5, z - 2, 1);
+        if (S.linked[i] && (((S.dist[i] - flowT) % 14) + 14) % 14 < 1.3) { ctx.fillStyle = 'rgba(255,255,255,.45)'; ctx.fillRect(x, y, ts, ts); }
+        if (S.shineUntil[i] > S.t && ((i * 7 + Math.floor(S.t * 3)) % 9 === 0)) { ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.fillRect(x + z * 0.6, y + z * 0.2, 2, 2); }
+      }
+      continue;
+    }
+    const locked = !S.unlocked[SEC[i]];
+    ctx.fillStyle = S.ever[i] ? COL.stormBase : d >= 1 ? COL.dust : hexLerp(COL.bare, COL.dust, d); ctx.fillRect(x, y, ts, ts);
+    if (detail && !locked) {
+      const n = Math.ceil(d * 6), ds = Math.max(1.5, z / 7);
+      for (let k = 0; k < n; k++) { ctx.fillStyle = k & 1 ? COL.dotL : COL.dotD; ctx.fillRect(x + DOTS[i * 12 + k * 2] * z - ds / 2, y + DOTS[i * 12 + k * 2 + 1] * z - ds / 2, ds, ds); }
+    }
+    if (S.ever[i] && S.t - S.stormAt[i] < 0.4) { ctx.fillStyle = 'rgba(255,255,255,.3)'; ctx.fillRect(x, y, ts, ts); }
+  }
+  // Grid Link lines: each linked tile to its BFS parent
+  if (detail) {
+    ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * C + c, pi = S.par[i]; if (KIND[i] || !S.linked[i] || pi < 0 || S.dirt[i] !== 0) continue; ctx.moveTo(X(c + 0.5), Y(r + 0.5)); ctx.lineTo(X(pi % C + 0.5), Y(((pi / C) | 0) + 0.5)); }
+    ctx.stroke();
+  }
+  // locked sectors + gate pads
+  const g = nextGate(S);
+  for (let s = 1; s < 6; s++) if (!S.unlocked[s]) {
+    const sc = (s & 1) * 24, sr = (2 - (s >> 1)) * 24;
+    ctx.fillStyle = 'rgba(8,10,14,.55)'; ctx.fillRect(X(sc), Y(sr), 24 * z, 24 * z);
+    ctx.setLineDash([6, 6]); ctx.strokeStyle = s === g ? '#FFD45E' : '#555'; ctx.lineWidth = 2; ctx.strokeRect(X(sc), Y(sr), 24 * z, 24 * z); ctx.setLineDash([]);
+  }
+  if (g > 0) {
+    const pd = PADS[g], aff = S.cash >= gateCost(S, g), pulse = 0.5 + 0.5 * Math.sin(S.t * 6);
+    ctx.fillStyle = aff ? 'rgba(255,212,94,' + (0.5 + 0.4 * pulse).toFixed(2) + ')' : 'rgba(255,212,94,.35)';
+    ctx.beginPath(); ctx.roundRect(X(pd.c), Y(pd.r), pd.w * z, pd.h * z, 4); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.font = 'bold ' + Math.max(8, z * 0.7) + 'px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('$' + fmt(gateCost(S, g)), X(pd.c + pd.w / 2), Y(pd.r + pd.h / 2) + z * 0.25);
+  }
+  // Depot + Refinery / Launch Pad
+  ctx.fillStyle = '#d9dee4'; ctx.fillRect(X(DEPOT.c), Y(DEPOT.r), 4 * z, 4 * z);
+  ctx.fillStyle = '#FF9F43'; ctx.fillRect(X(DEPOT.c), Y(DEPOT.r + 3.4), 4 * z, 0.6 * z);
+  ctx.fillStyle = '#9aa3ad'; ctx.fillRect(X(DEPOT.c + 4), Y(DEPOT.r), 2 * z, 4 * z);
+  const fk = S.fuel / S.cfg.refinery.tankKg; ctx.fillStyle = '#FF9F43'; ctx.fillRect(X(DEPOT.c + 4.3), Y(DEPOT.r + 0.3 + 3.4 * (1 - fk)), 0.6 * z, 3.4 * fk * z);
+  ctx.fillStyle = canLaunch(S) ? '#FFD45E' : '#eef'; ctx.beginPath(); ctx.moveTo(X(DEPOT.c + 5.4), Y(DEPOT.r + 0.2)); ctx.lineTo(X(DEPOT.c + 5.85), Y(DEPOT.r + 2.2)); ctx.lineTo(X(DEPOT.c + 4.95), Y(DEPOT.r + 2.2)); ctx.closePath(); ctx.fill();
+  if (detail) { ctx.fillStyle = '#222'; ctx.font = 'bold ' + z * 0.75 + 'px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DEPOT', X(DEPOT.c + 2), Y(DEPOT.r + 2.2)); }
+  // storm
+  if (st.phase === 'warn' || st.phase === 'blow') {
+    const by = Y(st.r0), bh = S.cfg.storm.bandRows * z;
+    if (st.phase === 'warn') { ctx.fillStyle = 'rgba(138,141,147,' + (0.08 + 0.06 * Math.sin(S.t * 8)).toFixed(2) + ')'; ctx.fillRect(0, by, W, bh); }
+    else {
+      const fx = X(st.front);
+      ctx.fillStyle = 'rgba(160,163,168,.7)';
+      for (let k = 0; k < 160; k++) { const yy = by + Math.random() * bh, xx = fx - st.dir * Math.random() * Math.random() * 6 * z; ctx.fillRect(xx, yy, 2.5, 2.5); }
+      ctx.strokeStyle = 'rgba(200,200,205,.35)'; ctx.lineWidth = 1; ctx.beginPath();
+      for (let k = 0; k < 14; k++) { const yy = by + Math.random() * bh, xx = fx - st.dir * Math.random() * 8 * z; ctx.moveTo(xx, yy); ctx.lineTo(xx - st.dir * 3 * z, yy); }
+      ctx.stroke();
+    }
+  }
+  // keepers
+  for (const k of S.keepers) {
+    const x = X(k.x), y = Y(k.y) - z * 0.6 + Math.sin(S.t * 4 + k.id) * 2, s = Math.max(5, z * 0.45);
+    if (k.working) { ctx.strokeStyle = 'rgba(62,230,255,.6)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(X(k.x), Y(k.y)); ctx.stroke(); }
+    ctx.fillStyle = '#3EE6FF'; ctx.beginPath(); ctx.moveTo(x, y - s); ctx.lineTo(x + s, y + s * 0.7); ctx.lineTo(x - s, y + s * 0.7); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y + s * 0.1, s * 0.25, 0, Math.PI * 2); ctx.fill();
+  }
+  drawPlayer(S, X, Y, z);
+  // fx
+  for (const f of S.fx) {
+    ctx.globalAlpha = clamp(f.life * 2, 0, 1);
+    if (f.type === 'dot') { ctx.fillStyle = f.col; ctx.fillRect(X(f.x) - 2, Y(f.y) - 2, 4, 4); }
+    else { ctx.fillStyle = f.col; ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(f.text, X(f.x), Y(f.y)); }
+  }
+  ctx.globalAlpha = 1;
+  // zoomed out: big Moon %
+  if (cam.k > 0.3) {
+    ctx.globalAlpha = clamp((cam.k - 0.3) / 0.4, 0, 1); ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 34px system-ui';
+    ctx.fillText('Moon ' + moonPct(S, 2) + '%', W / 2, HUD_H + 50); ctx.font = '13px system-ui'; ctx.fillStyle = '#ccc';
+    ctx.fillText(S.t < 4 ? 'one planet. one ' + S.cfg.tools[S.tool].id.toLowerCase() + '.' : S.litCount + ' panels lit', W / 2, HUD_H + 72); ctx.globalAlpha = 1;
+  }
+  drawGoalArrow(S, X, Y);
+  ctx.restore();
+  drawHud(S);
+}
+const moonPct = (S, d) => (100 * S.everCount / SWEEPABLE).toFixed(d);
+function drawPlayer(S, X, Y, z) {
+  const p = S.player, x = X(p.x), y = Y(p.y), w = toolWidth(S), o = -Math.floor((w - 1) / 2);
+  ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.lineWidth = 1; ctx.strokeRect(X(p.tc + o), Y(p.tr + o), w * z, w * z); // footprint
+  ctx.save(); ctx.translate(x, y); ctx.rotate(p.face);
+  const u = z, tier = S.tool;
+  ctx.fillStyle = '#d7dbe0'; ctx.strokeStyle = '#d7dbe0'; ctx.lineWidth = Math.max(1.5, u * 0.12);
+  if (tier === 0) { ctx.fillRect(0, -u * 0.06, u * 0.9, u * 0.12); ctx.fillStyle = '#fff'; ctx.fillRect(u * 0.7, -u * 0.22, u * 0.3, u * 0.44); ctx.fillStyle = '#3EE6FF'; ctx.fillRect(u * 0.72, -u * 0.2, u * 0.08, u * 0.4); }
+  else if (tier === 1) { ctx.fillStyle = '#FF9F43'; ctx.beginPath(); ctx.roundRect(u * 0.45, -u * 0.42, u * 0.4, u * 0.84, 3); ctx.fill(); ctx.fillStyle = '#fff'; for (let k = -3; k <= 3; k++) ctx.fillRect(u * 0.85, k * u * 0.11 - 1, u * 0.12, 2); }
+  else if (tier === 2) { ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(u * 0.7, 0); ctx.stroke(); for (let k = 0; k <= 8; k++) { const yy = lerp(-w / 2, w / 2, k / 8) * u; ctx.beginPath(); ctx.moveTo(u * 0.7, yy * 0.3); ctx.lineTo(u * 1.0, yy); ctx.stroke(); } }
+  else { ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(u * 0.6, 0); ctx.stroke(); ctx.fillStyle = '#FF9F43'; ctx.fillRect(u * 0.6, -w / 2 * u, u * 0.25, w * u); ctx.fillStyle = '#d7dbe0'; for (let k = 0; k <= w * 3; k++) ctx.fillRect(u * 0.85, (-w / 2 + k / 3) * u - 1, u * 0.15, 1.5);
+    if (tier >= 4) { ctx.strokeStyle = 'rgba(62,230,255,.4)'; ctx.beginPath(); ctx.arc(u * 0.7, 0, (w / 2 + 1) * u, -0.7, 0.7); ctx.stroke(); } }
+  // body (capsule + round helmet, no face) + canister on the back
+  const full = S.can >= capKg(S) - 1e-6, ck = S.can / capKg(S);
+  ctx.fillStyle = full && Math.sin(S.t * 12) > 0 ? '#ff5a3a' : '#555'; ctx.fillRect(-u * 0.75, -u * 0.25, u * 0.3, u * 0.5);
+  ctx.fillStyle = '#FF9F43'; ctx.fillRect(-u * 0.75, -u * 0.25 + u * 0.5 * (1 - ck), u * 0.3, u * 0.5 * ck);
+  ctx.fillStyle = '#f2f4f7'; ctx.beginPath(); ctx.roundRect(-u * 0.45, -u * 0.32, u * 0.7, u * 0.64, u * 0.3); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y - u * 0.05, u * 0.27, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#9aa3ad'; ctx.lineWidth = 1; ctx.stroke();
+}
+function goalTarget(S) {
+  if (S.can >= capKg(S) - 1e-6) return { x: DEPOT_C.x, y: DEPOT_C.y, label: 'Depot' };
+  const g = nextGate(S); if (g > 0 && S.cash >= gateCost(S, g)) return { x: PADS[g].c + 1, y: PADS[g].r + 1, label: 'Gate' };
+  if (canLaunch(S)) return { x: DEPOT.c + 5, y: DEPOT.r + 1, label: 'Launch' };
+  return null;
+}
+function drawGoalArrow(S, X, Y) {
+  const tg = goalTarget(S); if (!tg) return;
+  const x = X(tg.x), y = Y(tg.y);
+  if (x > 20 && x < W - 20 && y > HUD_H + 20 && y < BAR_Y - 20) { ctx.strokeStyle = '#FFD45E'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 14 + 3 * Math.sin(S.t * 6), 0, Math.PI * 2); ctx.stroke(); return; }
+  const a = Math.atan2(y - VIEW_CY, x - W / 2), ex = clamp(W / 2 + Math.cos(a) * 400, 22, W - 22), ey = clamp(VIEW_CY + Math.sin(a) * 400, HUD_H + 22, BAR_Y - 22);
+  ctx.save(); ctx.translate(ex, ey); ctx.rotate(a); ctx.fillStyle = '#FFD45E'; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.closePath(); ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#FFD45E'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText(tg.label, ex - Math.cos(a) * 26, ey - Math.sin(a) * 26 + 4);
+}
+function bar(x, y, w, h, k, col, label) {
+  ctx.fillStyle = '#2a2f37'; ctx.fillRect(x, y, w, h); ctx.fillStyle = col; ctx.fillRect(x, y, w * clamp(k, 0, 1), h);
+  ctx.fillStyle = '#fff'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(label, x + 3, y + h - 3);
+}
+const LABEL = { capacity: 'Capacity', width: 'Width', speed: 'Speed', payout: 'Payout', panelBoost: 'Panel Boost' };
+function drawHud(S) {
+  const cfg = S.cfg;
+  ctx.fillStyle = '#15181d'; ctx.fillRect(0, 0, W, HUD_H);
+  ctx.textAlign = 'left'; ctx.font = 'bold 18px system-ui'; ctx.fillStyle = '#FFD45E'; ctx.fillText('$' + fmt(S.cash), 10, 22);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#3EE6FF'; ctx.fillText('+$' + fmt(S.rate) + '/s', 10, 39);
+  ctx.fillStyle = '#999'; ctx.fillText(mmss(S.t) + (speed > 1 ? ' x' + speed : '') + (S.stardust ? '  ★' + S.stardust : ''), 10, 55);
+  ctx.textAlign = 'center'; ctx.font = 'bold 17px system-ui'; ctx.fillStyle = '#fff'; ctx.fillText('Moon ' + moonPct(S, 2) + '%', 158, 22);
+  const up = S.everCount ? S.litCount / S.everCount : 1;
+  ctx.font = 'bold 12px system-ui'; ctx.fillStyle = up >= 0.9 ? '#3EE6FF' : up >= 0.7 ? '#FFD45E' : '#ff7a5a'; ctx.fillText('Grid ' + Math.round(100 * up) + '%', 158, 39);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#999'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', 158, 55);
+  const full = S.can >= capKg(S) - 1e-6;
+  bar(232, 8, 112, 15, S.can / capKg(S), full && Math.sin(S.t * 12) > 0 ? '#ff5a3a' : '#FF9F43', (full ? 'FULL ' : 'Can ') + S.can.toFixed(1) + '/' + fmt(capKg(S)) + ' kg');
+  bar(232, 27, 112, 15, S.fuel / cfg.refinery.tankKg, '#c77dff', 'Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg);
+  ctx.fillStyle = '#999'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(cfg.tools[S.tool].id + ' · w' + toolWidth(S) + ' · ' + cfg.tools[S.tool].passes + ' pass', 232, 56);
+  // storm banner
+  const st = S.storm;
+  if (st.phase === 'warn') { ctx.fillStyle = 'rgba(255,122,90,.9)'; ctx.beginPath(); ctx.roundRect(85, HUD_H + 8, 220, 26, 13); ctx.fill(); ctx.fillStyle = '#111'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DUST STORM in ' + Math.ceil(st.blowAt - S.t), W / 2, HUD_H + 26); }
+  // bottom bar
+  ctx.fillStyle = '#15181d'; ctx.fillRect(0, BAR_Y, W, H - BAR_Y);
+  for (const b of BTN) {
+    let label, sub, en, c;
+    if (UPS.includes(b.id)) { c = costOf(S, b.id); label = LABEL[b.id] + ' ' + S.up[b.id]; sub = c == null ? 'MAX' : '$' + fmt(c); en = canBuy(S, b.id); }
+    else if (b.id === 'tool') { const nt = cfg.tools[S.tool + 1]; label = nt ? nt.id : 'Max tool'; sub = nt ? '$' + fmt(nt.cost) : '–'; en = canBuy(S, 'tool'); }
+    else if (b.id === 'keeper') { c = costOf(S, 'keeper'); label = 'Keeper ' + S.keepers.length + '/' + cfg.keeper.max; sub = !S.crewOpen ? 'after 1st storm' : c == null ? 'MAX' : c === 0 ? 'FREE' : '$' + fmt(c); en = canBuy(S, 'keeper'); }
+    else { label = 'Fuel ' + Math.round(S.fuelShare * 100) + '%'; sub = 'sell ' + Math.round((1 - S.fuelShare) * 100) + '% · tap'; en = true; }
+    ctx.fillStyle = en ? '#24323a' : '#1f2329'; ctx.strokeStyle = en ? (b.id === 'keeper' ? '#3EE6FF' : b.id === 'fuel' ? '#c77dff' : '#FFD45E') : '#333a44'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill(); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.font = 'bold 11px system-ui'; ctx.fillStyle = en ? '#f2f4f7' : '#7b828c'; ctx.fillText(label, b.x + b.w / 2, b.y + 21);
+    ctx.font = '11px system-ui'; ctx.fillStyle = en ? '#FFD45E' : '#6b727c'; ctx.fillText(sub, b.x + b.w / 2, b.y + 39);
+  }
+  if (canLaunch(S) && !S.popup) {
+    const p = 1 + 0.04 * Math.sin(S.t * 6), b = LAUNCH_BTN;
+    ctx.fillStyle = '#FFD45E'; ctx.beginPath(); ctx.roundRect(b.x - (p - 1) * 90, b.y, b.w * p, b.h, 25); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.font = 'bold 18px system-ui'; ctx.textAlign = 'center'; ctx.fillText('LAUNCH ▲', W / 2, b.y + 32);
+  }
+  // FTUE hint
+  const f = !S.popup && activeFtue(S);
+  if (f) {
+    const txt = f.text, bx = W / 2; ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(txt).width + 20, by = st.phase === 'warn' ? HUD_H + 42 : HUD_H + 10;
+    ctx.fillStyle = 'rgba(255,255,255,.93)'; ctx.beginPath(); ctx.roundRect(bx - tw / 2, by, tw, 24, 12); ctx.fill(); ctx.fillStyle = '#111'; ctx.textAlign = 'center'; ctx.fillText(txt, bx, by + 16);
+    if (f.btn != null) { const b = BTN[f.btn]; ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(b.x - 3, b.y - 3, b.w + 6, b.h + 6, 12); ctx.globalAlpha = 0.5 + 0.5 * Math.sin(S.t * 8); ctx.stroke(); ctx.globalAlpha = 1; }
+  }
+  if (joy) { ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 40, 0, Math.PI * 2); ctx.stroke(); const dx = joy.x - joy.ox, dy = joy.y - joy.oy, d = Math.hypot(dx, dy), k = d > 40 ? 40 / d : 1; ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.beginPath(); ctx.arc(joy.ox + dx * k, joy.oy + dy * k, 16, 0, Math.PI * 2); ctx.fill(); }
+  if (S.popup) {
+    ctx.fillStyle = '#000b'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#232830'; ctx.beginPath(); ctx.roundRect(40, 320, 310, 210, 14); ctx.fill(); ctx.textAlign = 'center';
+    if (S.popup.kind === 'offline') {
+      const P = S.popup; ctx.fillStyle = '#eee'; ctx.font = 'bold 15px system-ui'; ctx.fillText('Away for ' + P.m + ' min', W / 2, 356);
+      ctx.font = '13px system-ui'; ctx.fillText('Your grid held at ' + Math.round(P.up * 100) + '% while you were away', W / 2, 384);
+      ctx.fillStyle = '#FFD45E'; ctx.font = 'bold 16px system-ui'; ctx.fillText('+$' + fmt(P.cash), W / 2, 414);
+      ctx.fillStyle = '#999'; ctx.font = '11px system-ui'; ctx.fillText(S.keepers.length ? S.keepers.length + ' Keeper(s) on duty' : 'no Keepers: storms ate your grid', W / 2, 436);
+      for (const [i, l] of [[0, 'Collect'], [1, 'x2 (fake ad)']]) { const b = POP_BTN[i]; ctx.fillStyle = i ? '#3EE6FF' : '#3a414c'; ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill(); ctx.fillStyle = i ? '#111' : '#eee'; ctx.font = 'bold 14px system-ui'; ctx.fillText(l, b.x + b.w / 2, b.y + 34); }
+    } else {
+      const P = S.popup; ctx.fillStyle = '#FFD45E'; ctx.font = 'bold 22px system-ui'; ctx.fillText('Launched!', W / 2, 362);
+      ctx.fillStyle = '#eee'; ctx.font = '14px system-ui'; ctx.fillText('Moon ' + P.litPct.toFixed(1) + '% Lit at ' + mmss(P.t), W / 2, 394);
+      ctx.fillStyle = '#c77dff'; ctx.font = 'bold 18px system-ui'; ctx.fillText('+' + P.stardust + ' Stardust', W / 2, 428);
+      ctx.fillStyle = '#999'; ctx.font = '11px system-ui'; ctx.fillText('Next planet not in greybox: Moon resets, tool kept.', W / 2, 468); ctx.fillText('Tap to continue', W / 2, 496);
+    }
+  }
+}
+const FTUE = [
+  { id: 'move', text: 'Drag anywhere to sweep', when: S => S.t > 3, done: S => S.everCount >= 4 },
+  { id: 'lit', text: 'Clean tiles light up and pay $/s', when: S => S.everCount >= 4, done: S => S.ftue.shownAt.lit != null && S.t - S.ftue.shownAt.lit > 5 },
+  { id: 'depot', text: 'Canister full: back to the Depot', when: S => S.can >= capKg(S) - 1e-6, done: S => S.tele.firstSell != null },
+  { id: 'cap', text: 'Upgrade Capacity', when: S => canBuy(S, 'capacity'), done: S => S.up.capacity > 0, btn: 0 },
+  { id: 'gate', text: 'Walk onto the gate to open a sector', when: S => nextGate(S) === 1 && S.cash >= gateCost(S, 1), done: S => S.unlocked[1] },
+  { id: 'storm', text: 'Storm dusted your panels: sweep them again', when: S => S.stormed > 0, done: S => S.keepers.length > 0 || (S.ftue.shownAt.storm != null && S.t - S.ftue.shownAt.storm > 6) },
+  { id: 'keeper', text: 'Free Keeper Drone: it guards your grid', when: S => canBuy(S, 'keeper'), done: S => S.keepers.length > 0, btn: 6 },
+  { id: 'tool', text: 'New tool!', when: S => canBuy(S, 'tool') && S.tool === 0, done: S => S.tool >= 1, btn: 5 },
+  { id: 'fuel', text: 'Dust → Fuel. Full tank + 70% Lit = Launch', when: S => S.t > 240, done: S => S.ftue.shownAt.fuel != null && S.t - S.ftue.shownAt.fuel > 8, btn: 7 },
+];
+function activeFtue(S) {
+  for (const f of FTUE) {
+    if (S.ftue.done[f.id]) continue;
+    if (f.done(S)) { S.ftue.done[f.id] = true; continue; }
+    if (f.when(S)) { S.ftue.shownAt[f.id] ??= S.t; return f; }
+  }
+  return null;
+}
+
+// ----- tuning panel -----
+function startGame(keep) { const S = newGame(CONFIG, keep); S.sfxFn = playSfx; return S; }
+let G = startGame(), speed = 1;
+const panel = document.getElementById('panel');
+function buildPanel() {
+  let h = '<h3>Time</h3>' + [1, 4, 10].map(s => `<button data-speed="${s}" class="${speed === s ? 'on' : ''}">x${s}</button>`).join('') +
+    `<button id="bReset">Reset</button><button id="bSkip">Skip 1 hour (offline)</button><button id="bCash">+$1000</button><button id="bSnd" class="${soundOn ? 'on' : ''}">Sound</button><button id="bZoom">Zoom to planet</button>`;
+  h += '<h3>Telemetry (this session)</h3><pre id="tele"></pre><button id="bCopy">Copy JSON</button>';
+  h += '<h3>Bot (headless, seeds 1-3)</h3><button id="bBot">Run GB1-GB4 report</button><div id="botOut"></div>';
+  h += '<h3>CONFIG (live; grid changes need Reset)</h3><textarea id="cfg" rows="22">' + JSON.stringify(CONFIG, null, 1) + '</textarea><button id="bApply">Apply</button><button id="bApplyReset">Apply + Reset</button><span id="cfgErr"></span>';
+  h += '<h3>selfTest</h3><pre>' + JSON.stringify(selfTestResult) + '</pre>';
+  panel.innerHTML = h;
+  panel.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; buildPanel(); });
+  panel.querySelector('#bReset').onclick = () => { G = startGame(); };
+  panel.querySelector('#bSkip').onclick = () => { skipOffline(G, 60); panel.style.display = 'none'; };
+  panel.querySelector('#bCash').onclick = () => { G.cash += 1000; };
+  panel.querySelector('#bSnd').onclick = () => { soundOn = !soundOn; buildPanel(); };
+  panel.querySelector('#bZoom').onclick = () => { G.zoomAt = G.t; panel.style.display = 'none'; };
+  panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G) }, null, 1));
+  const apply = reset => { try { const v = JSON.parse(panel.querySelector('#cfg').value); for (const k of Object.keys(CONFIG)) delete CONFIG[k]; Object.assign(CONFIG, v); panel.querySelector('#cfgErr').textContent = ' applied'; if (reset) G = startGame(); } catch (e) { panel.querySelector('#cfgErr').textContent = ' ' + e.message; } };
+  panel.querySelector('#bApply').onclick = () => apply(false); panel.querySelector('#bApplyReset').onclick = () => apply(true);
+  panel.querySelector('#bBot').onclick = () => {
+    const out = panel.querySelector('#botOut'); out.textContent = 'running (±10-30 s)...';
+    setTimeout(() => { const r = botReport(); delete r.runs; out.innerHTML = '<pre>' + JSON.stringify(r, null, 1) + '</pre>'; console.log('[bot]', r); }, 30);
+  };
+}
+function teleText(S) {
+  const T = teleSummary(S);
+  let s = `first lit ${mmss(T.firstLit)} | first upgrade ${mmss(T.firstUpgrade)} (GB1 <= 1:00)\nkeeper#1 ${mmss(T.keeper1)} | tier3 ${mmss(T.tier3)} | tier4 ${mmss(T.tier4)} | tier5 ${mmss(T.tier5)}\nlaunch ${mmss(T.launchAt)} (GB3 22-32 min) | Lit>sell from min ${T.litBeatsSellMin ?? '–'} (GB2 4-7)\nuptime: 3+ keepers ${T.uptimeK3 ?? '–'}% | 0 keepers ${T.uptimeK0 ?? '–'}% | storms ${T.storms}\n\n min   lit$  sell$ lit%  up%  tiles moon\n`;
+  for (const m of T.minutes.slice(-15)) { const tot = m.lit + m.sell; s += `${String(m.m).padStart(4)} ${String(m.lit).padStart(6)} ${String(m.sell).padStart(6)} ${String(tot ? Math.round(100 * m.lit / tot) : 0).padStart(4)} ${String(m.up ?? '–').padStart(4)} ${String(m.litTiles ?? '').padStart(6)} ${String(m.moon ?? '').padStart(5)}\n`; }
+  return s;
+}
+document.getElementById('btnPanel').onclick = () => { const on = panel.style.display !== 'block'; panel.style.display = on ? 'block' : 'none'; if (on) buildPanel(); };
+
+let last = performance.now(), teleTimer = 0, logMin = 0;
+function frame(now) {
+  const real = Math.min(0.1, (now - last) / 1000); last = now;
+  if (!G.popup) { let rem = real * speed; const inp = inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); rem -= d; } }
+  render(G);
+  teleTimer += real; if (teleTimer > 0.5 && panel.style.display === 'block') { teleTimer = 0; const el = document.getElementById('tele'); if (el) el.textContent = teleText(G); }
+  if (Math.floor(G.t / 60) > logMin) { logMin = Math.floor(G.t / 60); const m = G.tele.min[logMin - 1]; if (m) console.log('[tele]', JSON.stringify(Object.assign({ m: logMin, lit: Math.round(m.lit), sell: Math.round(m.sell) }, snap(G)))); }
+  requestAnimationFrame(frame);
+}
+Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); SP.render = render; SP.inputVec = inputVec; // console debugging
+const selfTestResult = selfTest();
+console.log('[selfTest]', selfTestResult);
+requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

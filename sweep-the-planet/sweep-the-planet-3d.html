@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Sweep the Planet 3D greybox</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e1014;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#eee}
+  #wrap{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%)}
+  #wrap canvas{position:absolute;left:0;top:0;display:block;touch-action:none}
+  #btnPanel{position:fixed;top:6px;right:6px;z-index:5;width:34px;height:34px;border-radius:8px;border:1px solid #445;background:#222831;color:#eee;font-size:18px;cursor:pointer}
+  #panel{position:fixed;top:0;right:0;bottom:0;width:min(390px,100vw);z-index:4;background:rgba(16,18,22,.97);overflow:auto;padding:46px 12px 20px;box-sizing:border-box;font-size:12px;display:none}
+  #panel h3{margin:14px 0 6px;font-size:13px;color:#3EE6FF}
+  #panel button{background:#2a303a;color:#eee;border:1px solid #445;border-radius:6px;padding:5px 8px;margin:2px;font-size:12px;cursor:pointer}
+  #panel button.on{background:#3EE6FF;color:#111}
+  #panel textarea{width:100%;background:#191c22;color:#eee;border:1px solid #444;border-radius:4px;font:11px monospace;box-sizing:border-box}
+  #panel pre{white-space:pre-wrap;font:11px/1.35 monospace;background:#191c22;padding:6px;border-radius:6px;margin:4px 0;overflow-x:auto}
+  #err{position:fixed;left:8px;right:8px;top:80px;z-index:6;background:#5a1d1d;color:#fff;padding:10px;border-radius:8px;font:12px monospace;display:none;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="gl"></canvas><canvas id="ui"></canvas></div>
+<button id="btnPanel" title="Tuning + telemetry (T)">&#9881;</button>
+<div id="panel"></div>
+<div id="err"></div>
+<!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
+<script src="sweep-sim.js"></script>
+<script type="module">
+// Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
+// Camera, world, player, workers and storm are 3D; HUD, joystick and popups are a 2D overlay canvas.
+// Upgrades are in-world for now: walk onto the UPGRADES pad to open the terminal sheet; gate pads are pay zones (stand = cash flows).
+import * as THREE from './lib/three.module.min.js';
+const W = 390, H = 844, HUD_H = 64;
+// in-world zones (tile coords). Edit here after the UI-vs-in-world research (01_riset/batch7c-...).
+const ZONES = {
+  terminal: { c: 3, r: 62, w: 3, h: 3, label: 'UPGRADES', color: 0x3EE6FF }, // standing inside opens the upgrade sheet
+  sell: { c: DEPOT.c, r: DEPOT.r, w: 4, h: 4, label: 'SELL' },                 // Depot: walking in sells the canister (sim rule)
+};
+const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 21, follow: 6, widthZoom: 0.07, planetDist: 175 };
+const errBox = document.getElementById('err');
+addEventListener('error', e => { errBox.style.display = 'block'; errBox.textContent += (e.message || e) + '\n'; });
+
+// ----- sizing (portrait 390 x 844 logical, fit to window like the 2D greybox) -----
+const wrap = document.getElementById('wrap'), glCanvas = document.getElementById('gl'), ui = document.getElementById('ui'), ctx = ui.getContext('2d');
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
+renderer.setClearColor(0x0e1014);
+let scale = 1;
+function resize() {
+  scale = Math.min(innerWidth / W, innerHeight / H); const dpr = Math.min(window.devicePixelRatio || 1, 2), cw = W * scale, ch = H * scale;
+  wrap.style.width = cw + 'px'; wrap.style.height = ch + 'px';
+  renderer.setPixelRatio(dpr); renderer.setSize(cw, ch, true);
+  ui.style.width = cw + 'px'; ui.style.height = ch + 'px'; ui.width = Math.round(cw * dpr); ui.height = Math.round(ch * dpr);
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+// ----- scene -----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(CAM.fov, W / H, 0.5, 900);
+scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x30343c, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2); sun.position.set(-20, 40, 25); scene.add(sun);
+const lam = (color, extra = {}) => new THREE.MeshLambertMaterial(Object.assign({ color, flatShading: true }, extra));
+
+// ground: one plane, per-tile state in a 48 x 72 DataTexture, dust dots / panel lines / Grid Link wave drawn in the shader
+const tileData = new Uint8Array(N * 4), tileTex = new THREE.DataTexture(tileData, C, R, THREE.RGBAFormat);
+tileTex.magFilter = tileTex.minFilter = THREE.NearestFilter; tileTex.needsUpdate = true;
+const groundMat = new THREE.ShaderMaterial({
+  uniforms: { uTiles: { value: tileTex }, uTime: { value: 0 }, uGrid: { value: new THREE.Vector2(C, R) } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: `
+    precision highp float; uniform sampler2D uTiles; uniform float uTime; uniform vec2 uGrid; varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float bit(float f, float b){ return mod(floor(f / b), 2.0); }
+    void main(){
+      vec2 g = vec2(vUv.x * uGrid.x, (1.0 - vUv.y) * uGrid.y), cell = floor(g), f = fract(g);
+      vec4 t = texture2D(uTiles, (cell + 0.5) / uGrid);
+      float dirt = t.r, fl = floor(t.g * 255.0 + 0.5), dist = t.b * 255.0, pop = t.a;
+      float ever = bit(fl, 1.0), linked = bit(fl, 2.0), locked = bit(fl, 4.0), depot = bit(fl, 8.0), shine = bit(fl, 16.0), gate = bit(fl, 32.0), band = bit(fl, 64.0);
+      vec3 col;
+      if (depot > 0.5) col = vec3(0.30, 0.32, 0.36);
+      else if (dirt < 0.003 && ever > 0.5) {
+        col = linked > 0.5 ? vec3(0.243, 0.902, 1.0) : vec3(0.13, 0.58, 0.68);
+        float line = max(max(step(abs(f.x - 0.5), 0.025), step(abs(f.y - 0.5), 0.025)), max(step(f.x, 0.035), step(f.y, 0.035)));
+        col = mix(col, col * 0.6, line);
+        col += 0.10 * (1.0 - length(f - 0.5) * 1.7);                                   // soft centre glow
+        if (linked > 0.5 && mod(dist - uTime * 10.0, 14.0) < 1.3) col = mix(col, vec3(1.0), 0.4); // Grid Link flow from the Depot
+        if (shine > 0.5 && h(cell + floor(uTime * 3.0)) > 0.8 && length(f - vec2(0.7, 0.3)) < 0.08) col = vec3(1.0);
+        if (pop < 0.999) col = mix(col, vec3(1.0), 0.7 * (1.0 - pop));
+      } else {
+        col = ever > 0.5 ? vec3(0.12, 0.34, 0.39) : mix(vec3(0.17, 0.19, 0.22), vec3(0.54, 0.553, 0.576), dirt);
+        float n = ceil(dirt * 6.0);
+        for (int k = 0; k < 6; k++) {
+          if (float(k) >= n) break;
+          vec2 c = vec2(h(cell + float(k) * 7.13), h(cell + float(k) * 3.31 + 11.0)) * 0.8 + 0.1;
+          if (length(f - c) < 0.085) col = mod(float(k), 2.0) < 1.0 ? vec3(0.42, 0.435, 0.46) : vec3(0.66, 0.67, 0.69);
+        }
+      }
+      if (locked > 0.5) col *= 0.42;
+      if (gate > 0.5 && mod(cell.x + cell.y, 2.0) < 1.0) col = mix(col, vec3(1.0, 0.83, 0.37), 0.75);
+      if (band > 0.5) col = mix(col, vec3(0.75, 0.72, 0.68), 0.12 + 0.08 * sin(uTime * 8.0));
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+});
+const groundGeo = new THREE.PlaneGeometry(C, R); groundGeo.rotateX(-Math.PI / 2); groundGeo.translate(C / 2, 0, R / 2);
+scene.add(new THREE.Mesh(groundGeo, groundMat));
+// the Moon under the map (seen at zoom-out: the sweepable map is a small plate on a whole planet)
+const moon = new THREE.Mesh(new THREE.IcosahedronGeometry(150, 3), lam(0x5b5e64)); moon.position.set(C / 2, -150.4, R / 2); scene.add(moon);
+for (let i = 0; i < 14; i++) { // craters: flat darker discs hugging the sphere
+  const a = i * 2.39996, d = 0.25 + (i % 5) * 0.12, dir = new THREE.Vector3(Math.cos(a) * d, 1, Math.sin(a) * d).normalize();
+  const cr = new THREE.Mesh(new THREE.CircleGeometry(4 + (i % 4) * 3, 10), lam(0x4a4d52)); cr.position.copy(moon.position).addScaledVector(dir, 150.3); cr.lookAt(moon.position.clone().addScaledVector(dir, 300)); scene.add(cr);
+}
+{ const g = new THREE.BufferGeometry(), p = []; for (let i = 0; i < 700; i++) { const v = new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.8 - 0.1, Math.random() - 0.5).normalize().multiplyScalar(500); p.push(v.x + C / 2, v.y, v.z + R / 2); } g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x9aa3ad, size: 1.6, sizeAttenuation: false }))); }
+
+// Depot (cube), Refinery (cylinder with fuel gauge), Launch Pad (cone rocket)
+const depot = new THREE.Group(); scene.add(depot);
+{ const b = new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.6, 3.6), lam(0xd9dee4)); b.position.set(DEPOT.c + 2, 0.8, DEPOT.r + 2); depot.add(b);
+  const s = new THREE.Mesh(new THREE.BoxGeometry(3.62, 0.3, 3.62), lam(0xFF9F43)); s.position.set(DEPOT.c + 2, 0.25, DEPOT.r + 2); depot.add(s);
+  const hop = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.5, 0.6, 6), lam(0x9aa3ad)); hop.position.set(DEPOT.c + 2, 1.9, DEPOT.r + 2); depot.add(hop); }
+const refinery = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.75, 2.4, 8), lam(0x9aa3ad, { transparent: true, opacity: 0.55 })); refinery.position.set(DEPOT.c + 4.8, 1.2, DEPOT.r + 3); scene.add(refinery);
+const fuelFill = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 1, 8), lam(0xc77dff)); fuelFill.position.set(DEPOT.c + 4.8, 0, DEPOT.r + 3); scene.add(fuelFill);
+const rocket = new THREE.Group(); rocket.position.set(DEPOT.c + 5, 0, DEPOT.r + 0.9); scene.add(rocket);
+{ const base = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.9, 0.2, 8), lam(0x6b727c)); base.position.y = 0.1; rocket.add(base);
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.38, 1.4, 6), lam(0xeef0f4)); body.position.y = 0.9; rocket.add(body);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.7, 6), lam(0xFF9F43)); nose.position.y = 1.95; rocket.add(nose); }
+// floor pads: terminal + gate pay zone (+ fill bar) and floating labels
+function labelSprite() {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64; const tex = new THREE.CanvasTexture(cv);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })); sp.scale.set(4, 1, 1); sp.renderOrder = 5;
+  sp.userData.set = (text, bg = '#FFD45E', fg = '#111') => { if (sp.userData.t === text + bg) return; sp.userData.t = text + bg; const c = cv.getContext('2d'); c.clearRect(0, 0, 256, 64); c.fillStyle = bg; c.beginPath(); c.roundRect(8, 8, 240, 48, 24); c.fill(); c.fillStyle = fg; c.font = 'bold 30px system-ui'; c.textAlign = 'center'; c.fillText(text, 128, 43); tex.needsUpdate = true; };
+  scene.add(sp); return sp;
+}
+const termPad = new THREE.Mesh(new THREE.BoxGeometry(ZONES.terminal.w, 0.08, ZONES.terminal.h), lam(0x1d5e6c)); termPad.position.set(ZONES.terminal.c + ZONES.terminal.w / 2, 0.04, ZONES.terminal.r + ZONES.terminal.h / 2); scene.add(termPad);
+const termBox = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.2, 0.5), lam(0x3EE6FF)); termBox.position.set(ZONES.terminal.c + ZONES.terminal.w / 2, 0.6, ZONES.terminal.r - 0.1); scene.add(termBox);
+const termLabel = labelSprite(); termLabel.position.set(termBox.position.x, 2.2, termBox.position.z); termLabel.userData.set('UPGRADES', '#3EE6FF');
+const sellLabel = labelSprite(); sellLabel.position.set(DEPOT.c + 2, 3.0, DEPOT.r + 2); sellLabel.userData.set('SELL', '#ffffff');
+const gatePad = new THREE.Mesh(new THREE.BoxGeometry(2, 0.1, 2), lam(0xFFD45E, { transparent: true, opacity: 0.85 })); scene.add(gatePad);
+const gateFill = new THREE.Mesh(new THREE.BoxGeometry(2, 0.14, 2), lam(0xFF9F43)); scene.add(gateFill);
+const gateLabel = labelSprite();
+
+// player: capsule + round helmet (no face), tool silhouette in front, canister with fill on the back
+const player = new THREE.Group(); scene.add(player);
+const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.45, 3, 8), lam(0xf2f4f7)); body.position.y = 0.6; player.add(body);
+const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), lam(0xffffff)); helmet.position.y = 1.2; player.add(helmet);
+const canShell = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.7, 0.5), lam(0x555b63)); canShell.position.set(-0.42, 0.7, 0); player.add(canShell);
+const canFill = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1, 0.52), lam(0xFF9F43)); canFill.position.set(-0.43, 0.35, 0); player.add(canFill);
+let toolGroup = null, toolKey = '';
+function buildTool(tier, w) {
+  if (toolGroup) player.remove(toolGroup);
+  const g = new THREE.Group(), grey = lam(0xd7dbe0), org = lam(0xFF9F43), cy = lam(0x3EE6FF);
+  const box = (sx, sy, sz, x, y, z, m) => { const b = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), m); b.position.set(x, y, z); g.add(b); return b; };
+  if (tier === 0) { box(0.9, 0.05, 0.07, 0.6, 0.5, 0, grey).rotation.z = -0.35; box(0.28, 0.08, 0.22, 1.02, 0.32, 0, grey); box(0.26, 0.06, 0.2, 1.02, 0.25, 0, cy); }
+  else if (tier === 1) { box(0.38, 0.16, 0.8, 0.8, 0.14, 0, org); box(0.36, 0.06, 0.78, 0.8, 0.03, 0, grey); }
+  else {
+    box(1.0, 0.06, 0.06, 0.55, 0.5, 0, grey).rotation.z = -0.5;
+    if (tier === 2) for (let k = 0; k < 8; k++) box(0.3, 0.04, 0.05, 1.05, 0.05, (k / 7 - 0.5) * w * 0.9, grey);
+    else { box(0.24, 0.16, w * 0.95, 1.0, 0.12, 0, org); box(0.12, 0.06, w * 0.95, 1.12, 0.03, 0, grey); }
+    if (tier >= 4) { const pack = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.6, 6), cy); pack.position.set(-0.7, 0.75, 0); g.add(pack); }
+  }
+  player.add(g); toolGroup = g;
+}
+const footprint = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 })); scene.add(footprint);
+// keepers: faceless triangle drones + beam
+const keeperMeshes = [];
+function keeperMesh() { const g = new THREE.Group(); const d = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.55, 3), new THREE.MeshBasicMaterial({ color: 0x3EE6FF })); d.rotation.x = Math.PI; g.add(d); const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.12, 1, 6), new THREE.MeshBasicMaterial({ color: 0x3EE6FF, transparent: true, opacity: 0.5 })); g.add(beam); g.userData.beam = beam; scene.add(g); return g; }
+// Lit pop: pool of raised cyan slabs (scale 1.0 -> 1.08 -> 1.0, rise and fall)
+const POP_MAX = 64, popMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 0.1, 1), new THREE.MeshBasicMaterial({ color: 0x9ff4ff }), POP_MAX); popMesh.frustumCulled = false; scene.add(popMesh);
+// storm: wall of dust points
+const STORM_P = 1400, stormGeo = new THREE.BufferGeometry(), stormPos = new Float32Array(STORM_P * 3), stormSeed = new Float32Array(STORM_P * 3);
+for (let i = 0; i < STORM_P * 3; i++) stormSeed[i] = Math.random();
+stormGeo.setAttribute('position', new THREE.BufferAttribute(stormPos, 3));
+const stormPts = new THREE.Points(stormGeo, new THREE.PointsMaterial({ color: 0xb4b2ac, size: 0.16, transparent: true, opacity: 0.8 })); stormPts.frustumCulled = false; scene.add(stormPts);
+
+// ----- per-frame world update -----
+const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3(), tmpS = new THREE.Vector3();
+const camState = { tx: 0, tz: 0, d: CAM.dist, init: false };
+function writeTiles(S) {
+  const st = S.storm, band = st.phase === 'warn', g = nextGate(S), popSec = S.cfg.feel.popSec; let pops = 0;
+  for (let i = 0; i < N; i++) {
+    const o = i * 4, c = i % C, r = (i / C) | 0, sec = SEC[i], locked = !S.unlocked[sec];
+    let fl = (S.ever[i] ? 1 : 0) | (S.linked[i] ? 2 : 0) | (locked ? 4 : 0) | (KIND[i] ? 8 : 0) | (S.shineUntil[i] > S.t ? 16 : 0);
+    if (g > 0 && sec === g && (c % 24 === 0 || c % 24 === 23 || r % 24 === 0 || r % 24 === 23)) fl |= 32;
+    if (band && r >= st.r0 && r < st.r0 + S.cfg.storm.bandRows) fl |= 64;
+    const age = S.t - S.popAt[i];
+    tileData[o] = Math.round(S.dirt[i] * 255); tileData[o + 1] = fl; tileData[o + 2] = S.dist[i] & 255; tileData[o + 3] = age < popSec ? Math.round(255 * age / popSec) : 255;
+    if (age < popSec && pops < POP_MAX) { const k = Math.sin(Math.PI * age / popSec); tmpS.set(1 + S.cfg.feel.popScale * k, 1, 1 + S.cfg.feel.popScale * k); tmpV.set(c + 0.5, 0.05 + 0.3 * k, r + 0.5); tmpM.compose(tmpV, tmpQ.identity(), tmpS); popMesh.setMatrixAt(pops++, tmpM); }
+  }
+  tmpM.makeScale(0, 0, 0); for (let k = pops; k < POP_MAX; k++) popMesh.setMatrixAt(k, tmpM);
+  popMesh.instanceMatrix.needsUpdate = true; tileTex.needsUpdate = true;
+}
+function zoomK(S) {
+  const f = S.cfg.feel; let k = 0;
+  if (S.t < f.introSec) k = S.t < 1.2 ? 1 : 1 - ease(clamp((S.t - 1.2) / (f.introSec - 1.2), 0, 1));
+  const za = S.t - S.zoomAt;
+  if (za >= 0 && za < f.zoomOutSec) k = Math.max(k, za < 0.5 ? ease(za / 0.5) : za > f.zoomOutSec - 0.5 ? ease((f.zoomOutSec - za) / 0.5) : 1);
+  return k;
+}
+let shake = 0;
+function updateWorld(S, realDt) {
+  const p = S.player, k = zoomK(S), yaw = CAM.yawDeg * Math.PI / 180, pitch = CAM.pitchDeg * Math.PI / 180;
+  groundMat.uniforms.uTime.value = S.t;
+  writeTiles(S);
+  // camera: smooth follow, zoom-out with tool width, pull back to the planet on intro / every 10% Moon
+  const a = 1 - Math.exp(-CAM.follow * realDt);
+  if (!camState.init) { camState.tx = p.x; camState.tz = p.y; camState.init = true; }
+  camState.tx += (p.x - camState.tx) * a; camState.tz += (p.y - camState.tz) * a;
+  const baseD = CAM.dist * (1 + CAM.widthZoom * (toolWidth(S) - 1));
+  camState.d += (baseD - camState.d) * a;
+  const d = Math.exp(lerp(Math.log(camState.d), Math.log(CAM.planetDist), k)), tx = lerp(camState.tx, C / 2, k), tz = lerp(camState.tz, R / 2, k);
+  const st = S.storm; if (st.phase === 'blow' && st.front > -2 && st.front < C + 2) shake = 0.15; shake = Math.max(0, shake - realDt * 0.5);
+  const sh = shake * shake * 2;
+  camera.position.set(tx + Math.sin(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh, Math.sin(pitch) * d, tz + Math.cos(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh);
+  camera.lookAt(tx, 0, tz);
+  // player
+  player.position.set(p.x, 0, p.y); player.rotation.y = -p.face;
+  body.position.y = 0.6 + (p.moving ? Math.abs(Math.sin(S.t * 14)) * 0.06 : 0);
+  const w = toolWidth(S), key = S.tool + ':' + w; if (key !== toolKey) { toolKey = key; buildTool(S.tool, w); }
+  const ck = clamp(S.can / capKg(S), 0, 1), full = ck >= 0.999;
+  canFill.scale.y = Math.max(0.001, ck * 0.7); canFill.position.y = 0.35 + ck * 0.35; canFill.material.color.setHex(full && Math.sin(S.t * 12) > 0 ? 0xff5a3a : 0xFF9F43);
+  const o = -Math.floor((w - 1) / 2); footprint.scale.set(w, 1, w); footprint.position.set(p.tc + o + w / 2, 0.03, p.tr + o + w / 2);
+  // keepers
+  while (keeperMeshes.length < S.keepers.length) keeperMeshes.push(keeperMesh());
+  keeperMeshes.forEach((m, i) => {
+    const kp = S.keepers[i]; m.visible = !!kp; if (!kp) return;
+    const y = 1.6 + Math.sin(S.t * 4 + i) * 0.12; m.position.set(kp.x, y, kp.y); m.rotation.y = S.t * 1.5 + i;
+    m.userData.beam.visible = !!kp.working; m.userData.beam.scale.y = y; m.userData.beam.position.y = -y / 2;
+  });
+  // Depot / Refinery / Launch Pad / pads
+  const fk = S.fuel / S.cfg.refinery.tankKg; fuelFill.scale.y = Math.max(0.001, fk * 2.2); fuelFill.position.y = 0.1 + fk * 1.1;
+  const ready = canLaunch(S); rocket.children[2].material.color.setHex(ready && Math.sin(S.t * 6) > 0 ? 0xFFD45E : 0xFF9F43); rocket.position.y = ready ? Math.abs(Math.sin(S.t * 3)) * 0.15 : 0;
+  const g = nextGate(S); gatePad.visible = gateFill.visible = gateLabel.visible = g > 0;
+  if (g > 0) {
+    const pd = PADS[g], cost = gateCost(S, g), paid = clamp(S.gatePaid / cost, 0, 1), pulse = 0.5 + 0.5 * Math.sin(S.t * 6);
+    gatePad.position.set(pd.c + pd.w / 2, 0.05, pd.r + pd.h / 2); gatePad.material.opacity = S.cash >= cost - S.gatePaid ? 0.6 + 0.35 * pulse : 0.45;
+    gateFill.scale.set(Math.max(0.001, paid), 1, 1); gateFill.position.set(pd.c + paid, 0.07, pd.r + pd.h / 2);
+    gateLabel.position.set(pd.c + pd.w / 2, 1.6, pd.r + pd.h / 2); gateLabel.userData.set('$' + fmt(cost - S.gatePaid));
+  }
+  termPad.material.color.setHex(inZone(S, ZONES.terminal) ? 0x3EE6FF : 0x1d5e6c);
+  // storm wall
+  stormPts.visible = st.phase === 'blow';
+  if (stormPts.visible) {
+    const bh = S.cfg.storm.bandRows;
+    for (let i = 0; i < STORM_P; i++) { const s0 = stormSeed[i * 3], s1 = stormSeed[i * 3 + 1], s2 = stormSeed[i * 3 + 2];
+      stormPos[i * 3] = st.front - st.dir * s0 * s0 * 7 + (Math.random() - 0.5) * 0.3; stormPos[i * 3 + 1] = s2 * s2 * 3 + Math.sin(S.t * 6 + i) * 0.1; stormPos[i * 3 + 2] = st.r0 + s1 * bh; }
+    stormGeo.attributes.position.needsUpdate = true;
+  }
+  moon.visible = true;
+}
+const inZone = (S, z) => inRectT(S.player.x, S.player.y, z);
+const toScreen = (x, y, z) => { tmpV.set(x, y, z).project(camera); return { x: (tmpV.x + 1) / 2 * W, y: (1 - tmpV.y) / 2 * H, behind: tmpV.z > 1 }; };
+
+// ----- audio (same beeps as 2D) -----
+let AC = null, soundOn = true;
+function tone(f, dur = 0.08, type = 'sine', vol = 0.06, delay = 0) {
+  if (!AC || !soundOn) return;
+  const t0 = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t0); g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g).connect(AC.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function playSfx(kind, n) {
+  if (kind === 'lit') tone(523.25 * Math.pow(2, (n || 0) * 2 / 12), 0.09, 'triangle', 0.07);
+  else if (kind === 'sell') { tone(196, 0.12, 'square', 0.03); tone(294, 0.12, 'square', 0.03, 0.07); }
+  else if (kind === 'warn') { tone(110, 0.5, 'sawtooth', 0.025); tone(98, 0.5, 'sawtooth', 0.025, 0.5); }
+  else if (kind === 'gate') [523, 659, 784].forEach((f, i) => tone(f, 0.18, 'triangle', 0.05, i * 0.08));
+  else if (kind === 'tool') [392, 523, 659, 1046].forEach((f, i) => tone(f, 0.16, 'triangle', 0.05, i * 0.07));
+  else if (kind === 'keeper') { tone(880, 0.1, 'sine', 0.05); tone(1320, 0.12, 'sine', 0.04, 0.08); }
+}
+
+// ----- input: joystick anywhere (screen direction rotated by camera yaw), WASD -----
+const keys = {}; let joy = null;
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if (e.key === 't' || e.key === 'T') document.getElementById('btnPanel').click(); });
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+function inputVec() {
+  let x = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0), y = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+  if (joy) { const dx = joy.x - joy.ox, dy = joy.y - joy.oy, d = Math.hypot(dx, dy); if (d > 6) { x = dx / Math.max(d, 40); y = dy / Math.max(d, 40); } }
+  if (!x && !y) return null;
+  const yaw = CAM.yawDeg * Math.PI / 180, cy = Math.cos(yaw), sy = Math.sin(yaw);
+  return { x: cy * x + sy * y, y: -sy * x + cy * y }; // screen right/down -> world x/z on the ground
+}
+const toLocal = e => { const r = ui.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; };
+const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+const SHEET_Y = 590;
+const BTN = ['capacity', 'width', 'speed', 'payout', 'panelBoost', 'tool', 'keeper', 'fuel'].map((id, i) => ({ id, x: 6 + (i % 4) * 95.5, y: SHEET_Y + 40 + Math.floor(i / 4) * 60, w: 91, h: 54 }));
+const LAUNCH_BTN = { x: 105, y: 520, w: 180, h: 50 }, POP_BTN = [{ x: 60, y: 450, w: 130, h: 56 }, { x: 200, y: 450, w: 130, h: 56 }];
+const FUEL_STEPS = [0, 0.3, 0.5, 0.7, 1];
+const sheetOpen = S => inZone(S, ZONES.terminal) && !S.popup;
+ui.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch { AC = null; } }
+  const p = toLocal(e);
+  if (G.popup) {
+    if (G.popup.kind === 'launch') { G = startGame({ tool: G.tool, stardust: G.stardust, launches: G.launches }); camState.init = false; return; }
+    if (inRect(p, POP_BTN[0]) || inRect(p, POP_BTN[1])) { const m = inRect(p, POP_BTN[1]) ? 2 : 1; G.cash += G.popup.cash * m; G.earned += G.popup.cash * m; G.popup = null; }
+    return;
+  }
+  if (canLaunch(G) && inRect(p, LAUNCH_BTN)) { G.popup = Object.assign({ kind: 'launch' }, launch(G)); return; }
+  if (sheetOpen(G) && p.y >= SHEET_Y) {
+    for (const b of BTN) if (inRect(p, b)) { if (b.id === 'fuel') G.fuelShare = FUEL_STEPS[(FUEL_STEPS.indexOf(G.fuelShare) + 1) % FUEL_STEPS.length]; else buy(G, b.id); return; }
+  }
+  if (p.y > HUD_H) { joy = { ox: p.x, oy: p.y, x: p.x, y: p.y, id: e.pointerId }; ui.setPointerCapture(e.pointerId); }
+});
+ui.addEventListener('pointermove', e => { if (joy && e.pointerId === joy.id) { const p = toLocal(e); joy.x = p.x; joy.y = p.y; } });
+const endJoy = e => { if (joy && e.pointerId === joy.id) joy = null; };
+ui.addEventListener('pointerup', endJoy); ui.addEventListener('pointercancel', endJoy);
+
+// ----- 2D overlay: HUD, floating text, goal arrow, terminal sheet, popups -----
+const moonPct = (S, d) => (100 * S.everCount / SWEEPABLE).toFixed(d);
+function bar(x, y, w, h, k, col, label) { ctx.fillStyle = '#2a2f37'; ctx.fillRect(x, y, w, h); ctx.fillStyle = col; ctx.fillRect(x, y, w * clamp(k, 0, 1), h); ctx.fillStyle = '#fff'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(label, x + 3, y + h - 3); }
+const LABEL = { capacity: 'Capacity', width: 'Width', speed: 'Speed', payout: 'Payout', panelBoost: 'Panel Boost' };
+function goalTarget(S) {
+  if (S.can >= capKg(S) - 1e-6) return { x: DEPOT_C.x, z: DEPOT_C.y, label: 'Sell' };
+  const g = nextGate(S); if (g > 0 && S.cash >= gateCost(S, g) - S.gatePaid) return { x: PADS[g].c + 1, z: PADS[g].r + 1, label: 'Gate' };
+  if (canLaunch(S)) return { x: DEPOT.c + 5, z: DEPOT.r + 1, label: 'Launch' };
+  if (S.ftue.wantTerminal) return { x: ZONES.terminal.c + 1.5, z: ZONES.terminal.r + 1.5, label: 'Upgrades' };
+  return null;
+}
+function drawOverlay(S) {
+  const cfg = S.cfg; ctx.clearRect(0, 0, W, H);
+  const k = zoomK(S);
+  for (const f of S.fx) { const s = toScreen(f.x, 1.2 + (1.3 - f.life) * 1.2, f.y); if (s.behind) continue; ctx.globalAlpha = clamp(f.life * 2, 0, 1); ctx.fillStyle = f.col; if (f.type === 'dot') ctx.fillRect(s.x - 2, s.y - 2, 4, 4); else { ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(f.text, s.x, s.y); } }
+  ctx.globalAlpha = 1;
+  if (k > 0.3) { ctx.globalAlpha = clamp((k - 0.3) / 0.4, 0, 1); ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 34px system-ui'; ctx.fillText('Moon ' + moonPct(S, 2) + '%', W / 2, HUD_H + 60); ctx.font = '13px system-ui'; ctx.fillStyle = '#ccc'; ctx.fillText(S.t < 4 ? 'one planet. one ' + cfg.tools[S.tool].id.toLowerCase() + '.' : S.litCount + ' panels lit', W / 2, HUD_H + 82); ctx.globalAlpha = 1; }
+  // goal arrow
+  const tg = k < 0.1 && goalTarget(S);
+  if (tg) {
+    const s = toScreen(tg.x, 0, tg.z);
+    if (!s.behind && s.x > 20 && s.x < W - 20 && s.y > HUD_H + 20 && s.y < H - 20) { ctx.strokeStyle = '#FFD45E'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(s.x, s.y - 30, 6 + 3 * Math.sin(S.t * 6), 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = '#FFD45E'; ctx.beginPath(); ctx.moveTo(s.x - 7, s.y - 22); ctx.lineTo(s.x + 7, s.y - 22); ctx.lineTo(s.x, s.y - 12); ctx.fill(); }
+    else { const cy = (HUD_H + H) / 2, a = Math.atan2(s.y - cy, s.x - W / 2) + (s.behind ? Math.PI : 0), ex = clamp(W / 2 + Math.cos(a) * 500, 22, W - 22), ey = clamp(cy + Math.sin(a) * 500, HUD_H + 22, H - 22);
+      ctx.save(); ctx.translate(ex, ey); ctx.rotate(a); ctx.fillStyle = '#FFD45E'; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.closePath(); ctx.fill(); ctx.restore();
+      ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText(tg.label, ex - Math.cos(a) * 26, ey - Math.sin(a) * 26 + 4); }
+  }
+  // HUD
+  ctx.fillStyle = 'rgba(21,24,29,.92)'; ctx.fillRect(0, 0, W, HUD_H);
+  ctx.textAlign = 'left'; ctx.font = 'bold 18px system-ui'; ctx.fillStyle = '#FFD45E'; ctx.fillText('$' + fmt(S.cash), 10, 22);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#3EE6FF'; ctx.fillText('+$' + fmt(S.rate) + '/s', 10, 39);
+  ctx.fillStyle = '#999'; ctx.fillText(mmss(S.t) + (speed > 1 ? ' x' + speed : '') + (S.stardust ? '  ★' + S.stardust : '') + '  ' + fps + 'fps', 10, 55);
+  ctx.textAlign = 'center'; ctx.font = 'bold 17px system-ui'; ctx.fillStyle = '#fff'; ctx.fillText('Moon ' + moonPct(S, 2) + '%', 158, 22);
+  const up = S.everCount ? S.litCount / S.everCount : 1;
+  ctx.font = 'bold 12px system-ui'; ctx.fillStyle = up >= 0.9 ? '#3EE6FF' : up >= 0.7 ? '#FFD45E' : '#ff7a5a'; ctx.fillText('Grid ' + Math.round(100 * up) + '%', 158, 39);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#999'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', 158, 55);
+  const full = S.can >= capKg(S) - 1e-6;
+  bar(232, 8, 112, 15, S.can / capKg(S), full && Math.sin(S.t * 12) > 0 ? '#ff5a3a' : '#FF9F43', (full ? 'FULL ' : 'Can ') + S.can.toFixed(1) + '/' + fmt(capKg(S)) + ' kg');
+  bar(232, 27, 112, 15, S.fuel / cfg.refinery.tankKg, '#c77dff', 'Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg);
+  ctx.fillStyle = '#999'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(cfg.tools[S.tool].id + ' · w' + toolWidth(S) + ' · ' + cfg.tools[S.tool].passes + ' pass', 232, 56);
+  const st = S.storm;
+  if (st.phase === 'warn') { ctx.fillStyle = 'rgba(255,122,90,.9)'; ctx.beginPath(); ctx.roundRect(85, HUD_H + 8, 220, 26, 13); ctx.fill(); ctx.fillStyle = '#111'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DUST STORM in ' + Math.ceil(st.blowAt - S.t), W / 2, HUD_H + 26); }
+  // terminal sheet (in-world upgrade terminal)
+  if (sheetOpen(S)) {
+    ctx.fillStyle = 'rgba(21,24,29,.95)'; ctx.beginPath(); ctx.roundRect(0, SHEET_Y, W, H - SHEET_Y + 20, 18); ctx.fill();
+    ctx.fillStyle = '#3EE6FF'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center'; ctx.fillText('UPGRADE TERMINAL', W / 2, SHEET_Y + 25);
+    for (const b of BTN) {
+      let label, sub, en, c;
+      if (UPS.includes(b.id)) { c = costOf(S, b.id); label = LABEL[b.id] + ' ' + S.up[b.id]; sub = c == null ? 'MAX' : '$' + fmt(c); en = canBuy(S, b.id); }
+      else if (b.id === 'tool') { const nt = cfg.tools[S.tool + 1]; label = nt ? nt.id : 'Max tool'; sub = nt ? '$' + fmt(nt.cost) : '–'; en = canBuy(S, 'tool'); }
+      else if (b.id === 'keeper') { c = costOf(S, 'keeper'); label = 'Keeper ' + S.keepers.length + '/' + cfg.keeper.max; sub = !S.crewOpen ? 'after 1st storm' : c == null ? 'MAX' : c === 0 ? 'FREE' : '$' + fmt(c); en = canBuy(S, 'keeper'); }
+      else { label = 'Fuel ' + Math.round(S.fuelShare * 100) + '%'; sub = 'sell ' + Math.round((1 - S.fuelShare) * 100) + '% · tap'; en = true; }
+      ctx.fillStyle = en ? '#24323a' : '#1f2329'; ctx.strokeStyle = en ? (b.id === 'keeper' ? '#3EE6FF' : b.id === 'fuel' ? '#c77dff' : '#FFD45E') : '#333a44'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill(); ctx.stroke();
+      ctx.textAlign = 'center'; ctx.font = 'bold 11px system-ui'; ctx.fillStyle = en ? '#f2f4f7' : '#7b828c'; ctx.fillText(label, b.x + b.w / 2, b.y + 22);
+      ctx.font = '11px system-ui'; ctx.fillStyle = en ? '#FFD45E' : '#6b727c'; ctx.fillText(sub, b.x + b.w / 2, b.y + 40);
+    }
+    ctx.fillStyle = '#888'; ctx.font = '11px system-ui'; ctx.fillText('walk off the pad to close', W / 2, H - 14);
+  }
+  if (canLaunch(S) && !S.popup) { const pz = 1 + 0.04 * Math.sin(S.t * 6), b = LAUNCH_BTN; ctx.fillStyle = '#FFD45E'; ctx.beginPath(); ctx.roundRect(b.x - (pz - 1) * 90, b.y, b.w * pz, b.h, 25); ctx.fill(); ctx.fillStyle = '#111'; ctx.font = 'bold 18px system-ui'; ctx.textAlign = 'center'; ctx.fillText('LAUNCH ▲', W / 2, b.y + 32); }
+  const f = !S.popup && !sheetOpen(S) && activeFtue(S);
+  if (f) { ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(f.text).width + 20, by = st.phase === 'warn' ? HUD_H + 42 : HUD_H + 10; ctx.fillStyle = 'rgba(255,255,255,.93)'; ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2, by, tw, 24, 12); ctx.fill(); ctx.fillStyle = '#111'; ctx.textAlign = 'center'; ctx.fillText(f.text, W / 2, by + 16); }
+  if (joy) { ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 40, 0, Math.PI * 2); ctx.stroke(); const dx = joy.x - joy.ox, dy = joy.y - joy.oy, d = Math.hypot(dx, dy), kk = d > 40 ? 40 / d : 1; ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.beginPath(); ctx.arc(joy.ox + dx * kk, joy.oy + dy * kk, 16, 0, Math.PI * 2); ctx.fill(); }
+  if (S.popup) {
+    ctx.fillStyle = '#000b'; ctx.fillRect(0, 0, W, H); ctx.fillStyle = '#232830'; ctx.beginPath(); ctx.roundRect(40, 320, 310, 210, 14); ctx.fill(); ctx.textAlign = 'center';
+    const P = S.popup;
+    if (P.kind === 'offline') {
+      ctx.fillStyle = '#eee'; ctx.font = 'bold 15px system-ui'; ctx.fillText('Away for ' + P.m + ' min', W / 2, 356);
+      ctx.font = '13px system-ui'; ctx.fillText('Your grid held at ' + Math.round(P.up * 100) + '% while you were away', W / 2, 384);
+      ctx.fillStyle = '#FFD45E'; ctx.font = 'bold 16px system-ui'; ctx.fillText('+$' + fmt(P.cash), W / 2, 414);
+      ctx.fillStyle = '#999'; ctx.font = '11px system-ui'; ctx.fillText(S.keepers.length ? S.keepers.length + ' Keeper(s) on duty' : 'no Keepers: storms ate your grid', W / 2, 436);
+      for (const [i, l] of [[0, 'Collect'], [1, 'x2 (fake ad)']]) { const b = POP_BTN[i]; ctx.fillStyle = i ? '#3EE6FF' : '#3a414c'; ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill(); ctx.fillStyle = i ? '#111' : '#eee'; ctx.font = 'bold 14px system-ui'; ctx.fillText(l, b.x + b.w / 2, b.y + 34); }
+    } else {
+      ctx.fillStyle = '#FFD45E'; ctx.font = 'bold 22px system-ui'; ctx.fillText('Launched!', W / 2, 362);
+      ctx.fillStyle = '#eee'; ctx.font = '14px system-ui'; ctx.fillText('Moon ' + P.litPct.toFixed(1) + '% Lit at ' + mmss(P.t), W / 2, 394);
+      ctx.fillStyle = '#c77dff'; ctx.font = 'bold 18px system-ui'; ctx.fillText('+' + P.stardust + ' Stardust', W / 2, 428);
+      ctx.fillStyle = '#999'; ctx.font = '11px system-ui'; ctx.fillText('Next planet not in greybox: Moon resets, tool kept.', W / 2, 468); ctx.fillText('Tap to continue', W / 2, 496);
+    }
+  }
+}
+const FTUE = [
+  { id: 'move', text: 'Drag anywhere to sweep', when: S => S.t > 3, done: S => S.everCount >= 4 },
+  { id: 'lit', text: 'Clean tiles light up and pay $/s', when: S => S.everCount >= 4, done: S => S.ftue.shownAt.lit != null && S.t - S.ftue.shownAt.lit > 5 },
+  { id: 'depot', text: 'Canister full: walk into the Depot to sell', when: S => S.can >= capKg(S) - 1e-6, done: S => S.tele.firstSell != null },
+  { id: 'cap', text: 'Stand on UPGRADES to buy', when: S => canBuy(S, 'capacity') || canBuy(S, 'tool'), done: S => S.tele.firstUpgrade != null, terminal: true },
+  { id: 'gate', text: 'Stand on the gold pad to open a sector', when: S => nextGate(S) === 1 && S.cash >= gateCost(S, 1) - S.gatePaid, done: S => S.unlocked[1] },
+  { id: 'storm', text: 'Storm dusted your panels: sweep them again', when: S => S.stormed > 0, done: S => S.keepers.length > 0 || (S.ftue.shownAt.storm != null && S.t - S.ftue.shownAt.storm > 6) },
+  { id: 'keeper', text: 'Free Keeper Drone at UPGRADES', when: S => canBuy(S, 'keeper'), done: S => S.keepers.length > 0, terminal: true },
+  { id: 'fuel', text: 'Dust → Fuel. Full tank + 70% Lit = Launch', when: S => S.t > 240, done: S => S.ftue.shownAt.fuel != null && S.t - S.ftue.shownAt.fuel > 8 },
+];
+function activeFtue(S) {
+  S.ftue.wantTerminal = false;
+  for (const f of FTUE) {
+    if (S.ftue.done[f.id]) continue;
+    if (f.done(S)) { S.ftue.done[f.id] = true; continue; }
+    if (f.when(S)) { S.ftue.shownAt[f.id] ??= S.t; S.ftue.wantTerminal = !!f.terminal; return f; }
+  }
+  return null;
+}
+
+// ----- tuning panel (same tools as 2D) -----
+function startGame(keep) { const S = newGame(CONFIG, keep); S.sfxFn = playSfx; S.payFlow = true; return S; }
+let G = startGame(), speed = 1, fps = 0;
+const panel = document.getElementById('panel');
+function buildPanel() {
+  let h = '<h3>Time</h3>' + [1, 4, 10].map(s => `<button data-speed="${s}" class="${speed === s ? 'on' : ''}">x${s}</button>`).join('') +
+    `<button id="bReset">Reset</button><button id="bSkip">Skip 1 hour (offline)</button><button id="bCash">+$1000</button><button id="bSnd" class="${soundOn ? 'on' : ''}">Sound</button><button id="bZoom">Zoom to planet</button>`;
+  h += '<h3>Camera</h3>' + ['pitchDeg', 'yawDeg', 'dist', 'fov'].map(k => `<label style="display:flex;justify-content:space-between">${k} <input type="number" step="any" data-cam="${k}" value="${CAM[k]}" style="width:70px"></label>`).join('');
+  h += '<h3>Telemetry (this session)</h3><pre id="tele"></pre><button id="bCopy">Copy JSON</button>';
+  h += '<h3>Bot (headless, seeds 1-3; same sim as 2D)</h3><button id="bBot">Run GB1-GB4 report</button><div id="botOut"></div>';
+  h += '<h3>CONFIG (live; grid changes need Reset)</h3><textarea id="cfg" rows="18">' + JSON.stringify(CONFIG, null, 1) + '</textarea><button id="bApply">Apply</button><button id="bApplyReset">Apply + Reset</button><span id="cfgErr"></span>';
+  h += '<h3>selfTest</h3><pre>' + JSON.stringify(selfTestResult) + '</pre>';
+  panel.innerHTML = h;
+  panel.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; buildPanel(); });
+  panel.querySelectorAll('[data-cam]').forEach(i => i.onchange = () => { CAM[i.dataset.cam] = +i.value; camera.fov = CAM.fov; camera.updateProjectionMatrix(); });
+  panel.querySelector('#bReset').onclick = () => { G = startGame(); camState.init = false; };
+  panel.querySelector('#bSkip').onclick = () => { skipOffline(G, 60); panel.style.display = 'none'; };
+  panel.querySelector('#bCash').onclick = () => { G.cash += 1000; };
+  panel.querySelector('#bSnd').onclick = () => { soundOn = !soundOn; buildPanel(); };
+  panel.querySelector('#bZoom').onclick = () => { G.zoomAt = G.t; panel.style.display = 'none'; };
+  panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G) }, null, 1));
+  const apply = reset => { try { const v = JSON.parse(panel.querySelector('#cfg').value); for (const k of Object.keys(CONFIG)) delete CONFIG[k]; Object.assign(CONFIG, v); panel.querySelector('#cfgErr').textContent = ' applied'; if (reset) G = startGame(); } catch (e) { panel.querySelector('#cfgErr').textContent = ' ' + e.message; } };
+  panel.querySelector('#bApply').onclick = () => apply(false); panel.querySelector('#bApplyReset').onclick = () => apply(true);
+  panel.querySelector('#bBot').onclick = () => { const out = panel.querySelector('#botOut'); out.textContent = 'running (±10-30 s)...'; setTimeout(() => { const r = botReport(); delete r.runs; out.innerHTML = '<pre>' + JSON.stringify(r, null, 1) + '</pre>'; console.log('[bot]', r); }, 30); };
+}
+function teleText(S) {
+  const T = teleSummary(S);
+  let s = `first lit ${mmss(T.firstLit)} | first upgrade ${mmss(T.firstUpgrade)} (GB1 <= 1:00)\nkeeper#1 ${mmss(T.keeper1)} | tier3 ${mmss(T.tier3)} | tier4 ${mmss(T.tier4)} | tier5 ${mmss(T.tier5)}\nlaunch ${mmss(T.launchAt)} (GB3 22-32 min) | Lit>sell from min ${T.litBeatsSellMin ?? '–'} (GB2 4-7)\nuptime: 3+ keepers ${T.uptimeK3 ?? '–'}% | 0 keepers ${T.uptimeK0 ?? '–'}% | storms ${T.storms}\n\n min   lit$  sell$  up%  tiles moon\n`;
+  for (const m of T.minutes.slice(-15)) s += `${String(m.m).padStart(4)} ${String(m.lit).padStart(6)} ${String(m.sell).padStart(6)} ${String(m.up ?? '–').padStart(4)} ${String(m.litTiles ?? '').padStart(6)} ${String(m.moon ?? '').padStart(5)}\n`;
+  return s;
+}
+document.getElementById('btnPanel').onclick = () => { const on = panel.style.display !== 'block'; panel.style.display = on ? 'block' : 'none'; if (on) buildPanel(); };
+
+// selfTest = shared sim test + 3D-only checks (pay zone, input rotation)
+function selfTest3d() {
+  const r = selfTest();
+  const S = newGame(JSON.parse(JSON.stringify(CONFIG)), { headless: true }); S.payFlow = true; S.cash = 30; S.player.x = PADS[1].c + 1; S.player.y = PADS[1].r + 1;
+  for (let i = 0; i < 40; i++) step(S, 0.05, null); const partial = S.gatePaid > 29 && !S.unlocked[1] && S.cash < 1e-6;
+  S.cash += 100; for (let i = 0; i < 40; i++) step(S, 0.05, null);
+  r.payZone = partial && S.unlocked[1] && Math.abs(S.cash - (130 - gateCost(S, 1))) < 1e-6 && S.gatePaid === 0;
+  keys.w = true; const v = inputVec(); keys.w = false; const yaw = CAM.yawDeg * Math.PI / 180;
+  r.inputMatchesCamera = Math.abs(v.x + Math.sin(yaw)) < 1e-9 && Math.abs(v.y + Math.cos(yaw)) < 1e-9; // "up" on screen = away from camera
+  r.pass = Object.entries(r).every(([k, v]) => k === 'pass' || v === true);
+  console.assert(r.pass, 'selfTest3d failed', r);
+  return r;
+}
+const selfTestResult = selfTest3d();
+console.log('[selfTest]', selfTestResult);
+Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.assign(SP, { updateWorld, drawOverlay, renderer, scene, camera, inputVec, CAM });
+
+let last = performance.now(), teleTimer = 0, logMin = 0, fpsN = 0, fpsT = 0;
+function frame(now) {
+  const real = Math.min(0.1, (now - last) / 1000); last = now;
+  if (!G.popup) { let rem = real * speed; const inp = inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); rem -= d; } }
+  updateWorld(G, real); renderer.render(scene, camera); drawOverlay(G);
+  fpsN++; fpsT += real; if (fpsT >= 1) { fps = Math.round(fpsN / fpsT); fpsN = 0; fpsT = 0; }
+  teleTimer += real; if (teleTimer > 0.5 && panel.style.display === 'block') { teleTimer = 0; const el = document.getElementById('tele'); if (el) el.textContent = teleText(G); }
+  if (Math.floor(G.t / 60) > logMin) { logMin = Math.floor(G.t / 60); const m = G.tele.min[logMin - 1]; if (m) console.log('[tele]', JSON.stringify({ m: logMin, lit: Math.round(m.lit), sell: Math.round(m.sell), litTiles: G.litCount })); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

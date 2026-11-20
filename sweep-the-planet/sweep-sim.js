@@ -9,15 +9,17 @@
 // ===== CONFIG: every tunable lives here (concept §13.2; values changed by greybox tuning are marked "tuned") =====
 const CONFIG = {
   grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 800, 2000, 6000] }, // tuned (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
-  player: { speed: 4.0 /* tiles per second */ },
-  dust: { kgPerTile: 0.25, pricePerKg: 4.0 }, // tuned (concept 1.0)
+  player: { speed: 4.8 /* tiles per second; 4.0 before the fine dust mask (full-tile coverage needs more walking) */ },
+  // pricePerKg: concept 1.0, 4.0 in the tile greybox, 4.5 with the fine dust mask. sub = mask cells per tile side; a tile is Lit at
+  // >= litCleanFrac clean cells; brushDepth = brush size along the facing; brushPad = brush a bit wider than `width` so strokes overlap.
+  dust: { kgPerTile: 0.25, pricePerKg: 4.5, sub: 6, litCleanFrac: 0.95, brushDepth: 0.5, brushPad: 0.1 },
   lit: { powerPerTile: 0.0015 /* $ per second; tuned (concept 0.01 = Lit beat sales in minute 1, Launch at 9 min) */, gridLinkMult: 2, linkRecalcSec: 1 },
   tools: [
-    { id: 'Toothbrush', width: 1, passes: 3, capKg: 10, speedMult: 1.0, cost: 0 },
-    { id: 'Scrub Brush', width: 1, passes: 2, capKg: 15, speedMult: 1.0, cost: 80 },
-    { id: 'Mop', width: 2, passes: 2, capKg: 20, speedMult: 1.0, cost: 400, shineMult: 1.25, shineSec: 60 },
-    { id: 'Push Broom', width: 3, passes: 1, capKg: 30, speedMult: 1.0, cost: 1200 }, // cost tuned (concept 2000)
-    { id: 'Vacuum Pack', width: 3, passes: 1, capKg: 60, speedMult: 1.0, cost: 5000, suctionRadius: 1 }, // cost tuned (concept 9000)
+    { id: 'Toothbrush', reach: 0.8, width: 1, passes: 3, capKg: 10, speedMult: 1.0, cost: 0 },
+    { id: 'Scrub Brush', reach: 0.9, width: 1, passes: 2, capKg: 15, speedMult: 1.0, cost: 45 }, // cost 80 before the fine dust mask (keeps GB1 <= 60 s)
+    { id: 'Mop', reach: 1.1, brush: 'round', width: 2, passes: 2, capKg: 20, speedMult: 1.0, cost: 400, shineMult: 1.25, shineSec: 60 },
+    { id: 'Push Broom', reach: 1.3, width: 3, passes: 1, capKg: 30, speedMult: 1.0, cost: 1200 }, // cost tuned (concept 2000)
+    { id: 'Vacuum Pack', reach: 1.2, brush: 'round', width: 3, passes: 1, capKg: 60, speedMult: 1.0, cost: 5000, suctionRadius: 1 }, // cost tuned (concept 9000)
   ],
   upgrades: {
     growth: 1.15,
@@ -145,6 +147,9 @@ function newGame(cfg, keep = {}) {
     ftue: { done: {}, shownAt: {} },
   };
   for (let i = 0; i < N; i++) S.dirt[i] = KIND[i] ? 0 : 1;
+  const SUB = S.SUB = cfg.dust.sub; S.MW = C * SUB; S.MH = R * SUB; S.sub = new Uint8Array(S.MW * S.MH); S.subStamp = new Int32Array(S.MW * S.MH); S.stampId = 1; S.lastHead = null;
+  for (let i = 0; i < N; i++) if (!KIND[i]) fillTile(S, i, 255);
+  S.maskDirty = { x0: 0, y0: 0, x1: S.MW, y1: S.MH };
   S.player.tc = Math.floor(S.player.x); S.player.tr = Math.floor(S.player.y);
   return S;
 }
@@ -176,27 +181,58 @@ function onLit(S, i, byKeeper) {
     if (ms > S.milestone) { S.milestone = ms; S.zoomAt = S.t; }
   }
 }
-function passTile(S, i, amt, collect) {
+// Fine dust mask: S.sub holds a dust level 0..255 per cell (S.SUB x S.SUB cells per tile, image layout MW x MH, row 0 = map top).
+// Economy stays per tile: S.dirt[i] = mean level of the tile's cells; the tile is Lit once >= dust.litCleanFrac of its cells are clean
+// (the last few cells are wiped then). kg are collected per cell, so a tile still yields dust.kgPerTile in total.
+function markMask(S, x0, y0, x1, y1) { if (S.headless) return; const m = S.maskDirty; if (!m) S.maskDirty = { x0, y0, x1, y1 }; else { m.x0 = Math.min(m.x0, x0); m.y0 = Math.min(m.y0, y0); m.x1 = Math.max(m.x1, x1); m.y1 = Math.max(m.y1, y1); } }
+function addKg(S, levels) { const kg = levels / 255 * S.cfg.dust.kgPerTile / (S.SUB * S.SUB); S.can = Math.min(capKg(S), S.can + kg); }
+function fillTile(S, i, level) { const SUB = S.SUB, c = i % C, r = (i / C) | 0; for (let y = 0; y < SUB; y++) S.sub.fill(level, (r * SUB + y) * S.MW + c * SUB, (r * SUB + y) * S.MW + c * SUB + SUB); markMask(S, c * SUB, r * SUB, c * SUB + SUB, r * SUB + SUB); }
+function refreshTile(S, i, collect) {
+  if (S.dirt[i] === 0) return;
+  const SUB = S.SUB, n = SUB * SUB, c = i % C, r = (i / C) | 0; let sum = 0, clean = 0;
+  for (let y = 0; y < SUB; y++) { const o = (r * SUB + y) * S.MW + c * SUB; for (let x = 0; x < SUB; x++) { const v = S.sub[o + x]; sum += v; if (v === 0) clean++; } }
+  if (clean >= S.cfg.dust.litCleanFrac * n) { if (collect) addKg(S, sum); fillTile(S, i, 0); S.dirt[i] = 0; onLit(S, i, !collect); }
+  else S.dirt[i] = sum / (255 * n);
+}
+function passTile(S, i, amt, collect) { // one pass over the whole tile (Keepers, tests)
   if (KIND[i] || S.dirt[i] <= 0 || !S.unlocked[SEC[i]]) return 0;
-  let d = Math.min(S.dirt[i], amt);
-  if (collect) {
-    const room = capKg(S) - S.can;
-    if (room <= 1e-9) { S.blocked = S.t; return 0; }
-    d = Math.min(d, room / S.cfg.dust.kgPerTile); S.can += d * S.cfg.dust.kgPerTile;
-  }
-  S.dirt[i] -= d;
-  if (S.dirt[i] <= 1e-6) { S.dirt[i] = 0; onLit(S, i, !collect); }
-  return d;
+  if (collect && capKg(S) - S.can <= 1e-9) { S.blocked = S.t; return 0; }
+  const SUB = S.SUB, c = i % C, r = (i / C) | 0, lv = Math.round(255 * amt), before = S.dirt[i]; let got = 0;
+  for (let y = 0; y < SUB; y++) { const o = (r * SUB + y) * S.MW + c * SUB; for (let x = 0; x < SUB; x++) { const v = S.sub[o + x], d = Math.min(v, lv); S.sub[o + x] = v - d; got += d; } }
+  if (collect) addKg(S, got);
+  markMask(S, c * SUB, r * SUB, c * SUB + SUB, r * SUB + SUB); refreshTile(S, i, collect);
+  return before - S.dirt[i];
 }
 // A pass is applied to every tile that ENTERS the tool footprint (w x w square, + suction ring for the Vacuum Pack).
-function sweepAt(S, c, r) {
-  const td = toolDef(S), w = toolWidth(S), sr = td.suctionRadius || 0, o = -Math.floor((w - 1) / 2), id = ++S.footId, amt = 1 / td.passes;
-  for (let dy = o - sr; dy < o + w + sr; dy++) for (let dx = o - sr; dx < o + w + sr; dx++) {
-    const cc = c + dx, rr = r + dy; if (cc < 0 || rr < 0 || cc >= C || rr >= R) continue;
-    const i = rr * C + cc, ring = dy < o || dy >= o + w || dx < o || dx >= o + w;
-    if (S.foot[i] !== id - 1) passTile(S, i, ring ? (S.ever[i] ? 1 : amt * 0.5) : amt, true);
-    S.foot[i] = id;
+// The tool head sweeps, not the feet: head = player + reach (handle length per tier) along the facing. The brush is a rectangle
+// `width` across the facing and dust.brushDepth deep (round tools: a disc of diameter width + 2 x suctionRadius), stamped on the fine
+// mask along the head's path every step (sub-stamps every 0.2 tile so fast moves leave no gaps). A cell gets a pass when it enters
+// the brush; cells already under the brush in the previous stamp do not (so standing or pushing slowly is not free scrubbing).
+function headPos(S) { const p = S.player, rc = toolDef(S).reach || 0.9; return { x: p.x + Math.cos(p.face) * rc, y: p.y + Math.sin(p.face) * rc }; }
+function brushStamp(S, ax, ay, bx, by) {
+  const td = toolDef(S), w = toolWidth(S), SUB = S.SUB, MW = S.MW, f = S.player.face, fx = Math.cos(f), fy = Math.sin(f);
+  if (capKg(S) - S.can <= 1e-9) { S.blocked = S.t; return; }
+  const round = td.brush === 'round', rad = (w + 2 * (td.suctionRadius || 0)) / 2 + (S.cfg.dust.brushPad || 0), hw = w / 2 + (S.cfg.dust.brushPad || 0), hd = S.cfg.dust.brushDepth / 2, ext = round ? rad : Math.hypot(hw, hd);
+  const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 0.2)), id = ++S.stampId, lv = Math.round(255 / td.passes), fid = ++S.footId;
+  const x0 = Math.max(0, Math.floor((Math.min(ax, bx) - ext) * SUB)), x1 = Math.min(MW, Math.ceil((Math.max(ax, bx) + ext) * SUB));
+  const y0 = Math.max(0, Math.floor((Math.min(ay, by) - ext) * SUB)), y1 = Math.min(S.MH, Math.ceil((Math.max(ay, by) + ext) * SUB));
+  const touched = new Set(); let got = 0;
+  for (let sy = y0; sy < y1; sy++) for (let sx = x0; sx < x1; sx++) {
+    const px = (sx + 0.5) / SUB, py = (sy + 0.5) / SUB; let inside = false;
+    for (let k = 0; k <= steps && !inside; k++) {
+      const hx = ax + (bx - ax) * k / steps, hy = ay + (by - ay) * k / steps, dx = px - hx, dy = py - hy;
+      inside = round ? dx * dx + dy * dy <= rad * rad : Math.abs(-fy * dx + fx * dy) <= hw && Math.abs(fx * dx + fy * dy) <= hd;
+    }
+    if (!inside) continue;
+    const idx = sy * MW + sx, prev = S.subStamp[idx], i = ((sy / SUB) | 0) * C + ((sx / SUB) | 0);
+    S.subStamp[idx] = id; S.foot[i] = fid;
+    if (prev === id - 1 || KIND[i] || !S.unlocked[SEC[i]] || S.dirt[i] === 0) continue;
+    const v = S.sub[idx]; if (!v) continue;
+    const d = Math.min(v, lv); S.sub[idx] = v - d; got += d; touched.add(i);
   }
+  if (!got) return;
+  addKg(S, got); markMask(S, x0, y0, x1, y1);
+  for (const i of touched) refreshTile(S, i, true);
 }
 function walkable(S, x, y) {
   if (x < 0.25 || y < 0.25 || x > C - 0.25 || y > R - 0.25) return false;
@@ -210,8 +246,9 @@ function movePlayer(S, ix, iy, dt) {
   if (walkable(S, p.x + ix * sp, p.y)) p.x += ix * sp;
   if (walkable(S, p.x, p.y + iy * sp)) p.y += iy * sp;
   p.face = Math.atan2(iy, ix);
-  const tc = Math.floor(p.x), tr = Math.floor(p.y);
-  if (tc !== p.tc || tr !== p.tr) { p.tc = tc; p.tr = tr; sweepAt(S, tc, tr); }
+  p.tc = Math.floor(p.x); p.tr = Math.floor(p.y);
+  const h = headPos(S), l = S.lastHead, cont = l && Math.hypot(h.x - l.x, h.y - l.y) < 1.5; // a teleport (test, cheat) starts a new stroke
+  brushStamp(S, cont ? l.x : h.x, cont ? l.y : h.y, h.x, h.y); S.lastHead = h;
 }
 function recalcLinks(S) {
   const L = S.linked, q = S.q; L.fill(0); let h = 0, t = 0;
@@ -252,7 +289,7 @@ function stepStorm(S, dt) {
     st.front += st.dir * (C + 4) / cfg.frontSec * dt;
     while (st.ti < st.targets.length && (st.dir > 0 ? st.targets[st.ti] % C <= st.front : st.targets[st.ti] % C >= st.front)) {
       const i = st.targets[st.ti++];
-      if (S.dirt[i] === 0 && S.ever[i]) { S.dirt[i] = cfg.dirtAfter; S.litCount--; S.stormed++; S.stormAt[i] = S.t; }
+      if (S.dirt[i] === 0 && S.ever[i]) { S.dirt[i] = cfg.dirtAfter; fillTile(S, i, Math.round(255 * cfg.dirtAfter)); S.litCount--; S.stormed++; S.stormAt[i] = S.t; }
     }
     if (st.dir > 0 ? st.front > C + 2 : st.front < -2) {
       st.phase = 'idle'; st.count++; S.tele.storms++; st.next = st.blowAt + cfg.intervalSec; S.crewOpen = true;
@@ -310,7 +347,7 @@ function step(S, dt, input) {
 // ===== bot (headless) =====
 // reclean: bot also targets storm-dusted tiles. keepers: how many Keepers it will hire. idleAfter: minutes after which the bot stops playing (passive test).
 function nearestDirty(S, reclean) {
-  const p = S.player, here = p.tr * C + p.tc; let bi = -1, bd = 1e9;
+  const p = S.player, hp = headPos(S), here = Math.floor(hp.y) * C + Math.floor(hp.x); let bi = -1, bd = 1e9;
   for (let i = 0; i < N; i++) {
     if (KIND[i] || S.dirt[i] <= 0 || !S.unlocked[SEC[i]] || S.foot[i] === S.footId || i === here || (!reclean && S.ever[i])) continue;
     const c = i % C, r = (i / C) | 0, near = Math.abs(c + 0.5 - p.x) + Math.abs(r + 0.5 - p.y);
@@ -326,12 +363,26 @@ function botMove(S, B) {
   if (S.can >= capKg(S) - 1e-6 || S.t - S.blocked < 0.3) { B.tile = -1; return toward(p, DEPOT_C.x, DEPOT_C.y); }
   const g = nextGate(S);
   if (g > 0 && S.cash >= gateCost(S, g) && (B.cleanFrac >= 0.85 || B.noDirty)) return toward(p, PADS[g].c + 1, PADS[g].r + 1);
-  if (B.tile < 0 || S.dirt[B.tile] <= 0 || (Math.floor(p.x) === B.tile % C && Math.floor(p.y) === ((B.tile / C) | 0))) {
+  // human-like strokes: walk onto the target tile's row beside it, then sweep back and forth along the row so the tool head
+  // crosses the whole tile each leg (head = body + reach, so a leg runs from reach before the tile to reach past it)
+  if (B.tile < 0 || S.dirt[B.tile] <= 0 || B.legs > 12) {
     B.tile = nearestDirty(S, B.reclean); if (B.tile < 0 && B.reclean === 'near') B.tile = nearestDirty(S, true);
-    B.noDirty = B.tile < 0;
+    B.noDirty = B.tile < 0; B.dir = 0; B.legs = 0; B.appT = 0;
+    if (B.tile >= 0) { // lawnmower span: up to 4 tiles of the row, toward the dirtier side, inside the sector
+      const tc = B.tile % C, row = B.tile - tc, s0 = Math.floor(tc / 24) * 24, sum = k => (k >= s0 && k < s0 + 24 ? S.dirt[row + k] : 0);
+      const R3 = sum(tc + 1) + sum(tc + 2) + sum(tc + 3), L3 = sum(tc - 1) + sum(tc - 2) + sum(tc - 3);
+      B.a = R3 >= L3 ? tc : Math.max(s0, tc - (B.span || 0)); B.b = R3 >= L3 ? Math.min(s0 + 23, tc + (B.span || 0)) : tc;
+    }
   }
   if (B.tile < 0) return null;
-  return toward(p, B.tile % C + 0.5, ((B.tile / C) | 0) + 0.5);
+  const tc = B.tile % C, ty = ((B.tile / C) | 0) + 0.5, reach = toolDef(S).reach || 0.9, lo = Math.max(0.3, B.a - reach - 0.15), hi = Math.min(C - 0.3, B.b + 1 + reach + 0.15);
+  if (!B.dir) {
+    const side = Math.abs(p.x - lo) < Math.abs(p.x - hi) ? lo : hi;
+    if ((B.appT = (B.appT || 0) + 0.05) < 4 && (Math.abs(p.y - ty) > 0.2 || Math.abs(p.x - side) > 0.3)) return toward(p, side, ty); // blocked approach (wall): start the stroke anyway
+    B.dir = side === lo ? 1 : -1;
+  }
+  if ((B.dir > 0 && (p.x >= hi || !walkable(S, p.x + 0.3, p.y))) || (B.dir < 0 && (p.x <= lo || !walkable(S, p.x - 0.3, p.y)))) { B.dir = -B.dir; B.legs++; }
+  return { x: B.dir, y: clamp((ty - p.y) * 3, -0.4, 0.4) };
 }
 function toward(p, x, y) { const dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy); return d < 0.05 ? null : { x: dx / d, y: dy / d }; }
 function botBuy(S, B) {
@@ -422,6 +473,18 @@ function selfTest() {
   for (let k = 0; k < 400 && T.dirt[i0] > 0; k++) step(T, 0.05, null);
   out.keeperRelights = T.dirt[i0] === 0 && T.stormed === 0;
   out.lockedSectorUnsweepable = passTile(T, 10 * C + 5, 1, true) === 0;
+  // the tool head sweeps (ahead of the player), across the facing, `width` tiles wide
+  const H = newGame(clone(CONFIG), { headless: true }); H.player.x = 5.5; H.player.y = 60.5; H.player.face = 0; step(H, 0.05, { x: 1, y: 0 });
+  out.headSweeps = H.dirt[60 * C + 6] < 1 && H.dirt[60 * C + 5] === 1;
+  H.tool = 3; H.player.x = 10.5; H.player.y = 55.5; H.player.face = -Math.PI / 2; 
+  step(H, 0.05, { x: 0, y: -1 }); // Push Broom stroke upward: head ~ row 54, three columns wide
+  const hit = c => H.dirt[53 * C + c] < 1 || H.dirt[54 * C + c] < 1;
+  const edge = c => Math.min(H.dirt[53 * C + c], H.dirt[54 * C + c]) > 0.9; // brushPad only grazes the neighbours
+  out.widthAcross = [9, 10, 11].every(hit) && edge(8) && edge(12);
+  // a tile is Lit once 95% of its fine cells are clean, and a storm re-dusts its cells
+  const F = newGame(clone(CONFIG), { headless: true }), j = 60 * C + 5, SB = F.SUB;
+  for (let y = 0; y < SB; y++) for (let x = 0; x < SB; x++) if (y || x) F.sub[(60 * SB + y) * F.MW + 5 * SB + x] = 0;
+  refreshTile(F, j, true); out.fineLit = F.dirt[j] === 0 && F.litCount === 1 && F.sub[60 * SB * F.MW + 5 * SB] === 0;
   // launch resets planet but keeps tool + stardust
   T.tool = 3; T.fuel = CONFIG.refinery.tankKg; const r = launch(T); const U = newGame(clone(CONFIG), { tool: T.tool, stardust: T.stardust, headless: true });
   out.launchKeepsTool = U.tool === 3 && U.cash === 0 && U.litCount === 0 && U.stardust === r.stardust;
@@ -429,5 +492,5 @@ function selfTest() {
   out.pass = Object.values(out).every(v => v === true);
   return out;
 }
-globalThis.SP = { CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
+globalThis.SP = { headPos, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
 

@@ -15,6 +15,12 @@
   #panel button.on{background:#3EE6FF;color:#111}
   #panel textarea{width:100%;background:#191c22;color:#eee;border:1px solid #444;border-radius:4px;font:11px monospace;box-sizing:border-box}
   #panel pre{white-space:pre-wrap;font:11px/1.35 monospace;background:#191c22;padding:6px;border-radius:6px;margin:4px 0;overflow-x:auto}
+  #cheat{position:fixed;left:50%;top:70px;transform:translateX(-50%);width:min(360px,calc(100vw - 16px));z-index:7;background:rgba(40,12,12,.96);border:1px solid #ff7a5a;border-radius:12px;padding:10px;box-sizing:border-box;font-size:12px;display:none}
+  #cheat h3{margin:0 0 6px;font-size:13px;color:#ff7a5a;display:flex;justify-content:space-between;align-items:center}
+  #cheat button{background:#3a2020;color:#fff;border:1px solid #6a3a3a;border-radius:6px;padding:7px 8px;margin:2px;font-size:12px;cursor:pointer}
+  #cheat button.on{background:#ff7a5a;color:#111}
+  #cheat .row{margin:4px 0}
+  #cheat small{color:#c9a0a0;display:block;margin-top:6px}
   #err{position:fixed;left:8px;right:8px;top:80px;z-index:6;background:#5a1d1d;color:#fff;padding:10px;border-radius:8px;font:12px monospace;display:none;white-space:pre-wrap}
 </style>
 </head>
@@ -22,9 +28,11 @@
 <div id="wrap"><canvas id="gl"></canvas><canvas id="ui"></canvas></div>
 <button id="btnPanel" title="Tuning + telemetry (T)">&#9881;</button>
 <div id="panel"></div>
+<div id="cheat"></div>
 <div id="err"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
 <script src="sweep-sim.js"></script>
+<script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
 // Camera, world, player, workers and storm are 3D; HUD, joystick and popups are a 2D overlay canvas.
@@ -32,7 +40,8 @@
 //   cash, dust and space = in-world (sell at Depot, pay zones for sector gates, tool tiers, Keeper hire), cash visibly flows;
 //   number choices = small panel opened by standing on a pad (terminal: 5 stat branches; Refinery: Fuel share; Launch: confirm);
 //   meta/progress = HUD (cash + $/s, Moon % bar + Grid %, Shop, later Fuel / Star Map).
-import * as THREE from './lib/three.module.min.js';
+import * as THREE from 'three'; // importmap above: GLTFLoader imports the bare 'three' specifier
+import { GLTFLoader } from './lib/addons/loaders/GLTFLoader.js';
 const W = 390, H = 844, HUD_H = 60;
 // in-world pads (tile coords, all outside the Depot rect so they never trigger a sale). kind: 'panel' opens a sheet, 'pay' is a pay zone.
 const ZONES = {
@@ -67,46 +76,68 @@ scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x30343c, 2.2));
 const sun = new THREE.DirectionalLight(0xffffff, 2.2); sun.position.set(-20, 40, 25); scene.add(sun);
 const lam = (color, extra = {}) => new THREE.MeshLambertMaterial(Object.assign({ color, flatShading: true }, extra));
 
-// ground: one plane, per-tile state in a 48 x 72 DataTexture, dust dots / panel lines / Grid Link wave drawn in the shader
+// ground: one plane. Per-tile state (Lit, links, locks, pop) in a 48 x 72 DataTexture; the dust itself is the sim's fine mask
+// (S.sub, 6 x 6 cells per tile, one byte per cell) in a second DataTexture with linear filtering: a threshold gives the clean path
+// a sharp, smooth edge, the level gives dust thickness, and a hash adds fine grain. Only the changed rectangle is uploaded per frame.
 const tileData = new Uint8Array(N * 4), tileTex = new THREE.DataTexture(tileData, C, R, THREE.RGBAFormat);
 tileTex.magFilter = tileTex.minFilter = THREE.NearestFilter; tileTex.needsUpdate = true;
+const maskTex = new THREE.DataTexture(new Uint8Array(1), 1, 1, THREE.RedFormat, THREE.UnsignedByteType);
+maskTex.magFilter = maskTex.minFilter = THREE.LinearFilter; maskTex.unpackAlignment = 1;
 const groundMat = new THREE.ShaderMaterial({
-  uniforms: { uTiles: { value: tileTex }, uTime: { value: 0 }, uGrid: { value: new THREE.Vector2(C, R) } },
+  uniforms: { uTiles: { value: tileTex }, uMask: { value: maskTex }, uMaskSize: { value: new THREE.Vector2(1, 1) }, uTime: { value: 0 }, uGrid: { value: new THREE.Vector2(C, R) } },
   vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
   fragmentShader: `
-    precision highp float; uniform sampler2D uTiles; uniform float uTime; uniform vec2 uGrid; varying vec2 vUv;
+    precision highp float; uniform sampler2D uTiles; uniform sampler2D uMask; uniform vec2 uMaskSize; uniform float uTime; uniform vec2 uGrid; varying vec2 vUv;
     float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float bit(float f, float b){ return mod(floor(f / b), 2.0); }
     void main(){
-      vec2 g = vec2(vUv.x * uGrid.x, (1.0 - vUv.y) * uGrid.y), cell = floor(g), f = fract(g);
+      vec2 g = vec2(vUv.x * uGrid.x, (1.0 - vUv.y) * uGrid.y), cell = floor(g), f = fract(g), mu = g / uGrid;
       vec4 t = texture2D(uTiles, (cell + 0.5) / uGrid);
       float dirt = t.r, fl = floor(t.g * 255.0 + 0.5), dist = t.b * 255.0, pop = t.a;
       float ever = bit(fl, 1.0), linked = bit(fl, 2.0), locked = bit(fl, 4.0), depot = bit(fl, 8.0), shine = bit(fl, 16.0), gate = bit(fl, 32.0), band = bit(fl, 64.0);
       vec3 col;
-      if (depot > 0.5) col = vec3(0.30, 0.32, 0.36);
-      else if (dirt < 0.003 && ever > 0.5) {
+      if (depot > 0.5) { gl_FragColor = vec4(0.30, 0.32, 0.36, 1.0); return; }
+      // surface under the dust: a Lit solar panel, a dimmed panel (storm-dusted), or bare dark regolith
+      float line = max(max(step(abs(f.x - 0.5), 0.025), step(abs(f.y - 0.5), 0.025)), max(step(f.x, 0.035), step(f.y, 0.035)));
+      if (dirt < 0.003 && ever > 0.5) {
         col = linked > 0.5 ? vec3(0.243, 0.902, 1.0) : vec3(0.13, 0.58, 0.68);
-        float line = max(max(step(abs(f.x - 0.5), 0.025), step(abs(f.y - 0.5), 0.025)), max(step(f.x, 0.035), step(f.y, 0.035)));
         col = mix(col, col * 0.6, line);
-        col += 0.10 * (1.0 - length(f - 0.5) * 1.7);                                   // soft centre glow
+        col += 0.10 * (1.0 - length(f - 0.5) * 1.7);
         if (linked > 0.5 && mod(dist - uTime * 10.0, 14.0) < 1.3) col = mix(col, vec3(1.0), 0.4); // Grid Link flow from the Depot
         if (shine > 0.5 && h(cell + floor(uTime * 3.0)) > 0.8 && length(f - vec2(0.7, 0.3)) < 0.08) col = vec3(1.0);
         if (pop < 0.999) col = mix(col, vec3(1.0), 0.7 * (1.0 - pop));
-      } else {
-        col = ever > 0.5 ? vec3(0.12, 0.34, 0.39) : mix(vec3(0.17, 0.19, 0.22), vec3(0.54, 0.553, 0.576), dirt);
-        float n = ceil(dirt * 6.0);
-        for (int k = 0; k < 6; k++) {
-          if (float(k) >= n) break;
-          vec2 c = vec2(h(cell + float(k) * 7.13), h(cell + float(k) * 3.31 + 11.0)) * 0.8 + 0.1;
-          if (length(f - c) < 0.085) col = mod(float(k), 2.0) < 1.0 ? vec3(0.42, 0.435, 0.46) : vec3(0.66, 0.67, 0.69);
-        }
-      }
+      } else if (ever > 0.5) col = mix(vec3(0.10, 0.30, 0.35), vec3(0.06, 0.18, 0.21), line);
+      else col = vec3(0.16, 0.17, 0.20) + 0.03 * h(floor(g * 10.0));
+      // fine dust layer
+      float d = texture2D(uMask, mu).r;
+      float cover = smoothstep(0.04, 0.11, d);
+      float grain = h(floor(g * 36.0)) * 0.6 + h(floor(g * 9.0) + 3.1) * 0.4;
+      vec3 dust = vec3(0.63, 0.62, 0.60) * (0.80 + 0.32 * grain);
+      float dn = texture2D(uMask, mu + vec2(0.6, -0.6) / uMaskSize).r;                // light from top-left: lip shading at the edge
+      dust *= 1.0 + clamp((d - dn) * 1.6, -0.18, 0.12);
+      dust *= 1.0 - 0.22 * (cover - smoothstep(0.11, 0.30, d));                        // thin dark rim along the cleaned path
+      col = mix(col, dust, cover * mix(0.3, 1.0, d * d));                              // each pass visibly thins the layer
       if (locked > 0.5) col *= 0.42;
       if (gate > 0.5 && mod(cell.x + cell.y, 2.0) < 1.0) col = mix(col, vec3(1.0, 0.83, 0.37), 0.75);
       if (band > 0.5) col = mix(col, vec3(0.75, 0.72, 0.68), 0.12 + 0.08 * sin(uTime * 8.0));
       gl_FragColor = vec4(col, 1.0);
     }`,
 });
+// push the sim's changed mask rectangle to the GPU (texSubImage2D on the dirty region only; a new game re-binds the whole array)
+function syncMask(S) {
+  if (maskTex.image.data !== S.sub) {
+    maskTex.image = { data: S.sub, width: S.MW, height: S.MH }; maskTex.needsUpdate = true; groundMat.uniforms.uMaskSize.value.set(S.MW, S.MH); S.maskDirty = null; return;
+  }
+  const m = S.maskDirty; if (!m) return; S.maskDirty = null;
+  const tp = renderer.properties.get(maskTex); if (!tp.__webglTexture) { maskTex.needsUpdate = true; return; }
+  const gl = renderer.getContext(); renderer.state.bindTexture(gl.TEXTURE_2D, tp.__webglTexture);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.pixelStorei(gl.UNPACK_ROW_LENGTH, S.MW); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, m.x0); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, m.y0);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0, gl.RED, gl.UNSIGNED_BYTE, S.sub);
+  gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+  maskStats.uploads++; maskStats.cells += (m.x1 - m.x0) * (m.y1 - m.y0);
+}
+const maskStats = { uploads: 0, cells: 0 };
 const groundGeo = new THREE.PlaneGeometry(C, R); groundGeo.rotateX(-Math.PI / 2); groundGeo.translate(C / 2, 0, R / 2);
 scene.add(new THREE.Mesh(groundGeo, groundMat));
 // the Moon under the map (seen at zoom-out: the sweepable map is a small plate on a whole planet)
@@ -129,6 +160,7 @@ const rocket = new THREE.Group(); rocket.position.set(LZ.c + LZ.w + 0.9, 0, LZ.r
 { const base = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.9, 0.2, 8), lam(0x6b727c)); base.position.y = 0.1; rocket.add(base);
   const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.38, 1.4, 6), lam(0xeef0f4)); body.position.y = 0.9; rocket.add(body);
   const nose = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.7, 6), lam(0xFF9F43)); nose.position.y = 1.95; rocket.add(nose); }
+let rocketNose = rocket.children[2];
 // floor pads: terminal + gate pay zone (+ fill bar) and floating labels
 function labelSprite() {
   const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64; const tex = new THREE.CanvasTexture(cv);
@@ -159,24 +191,82 @@ const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.45, 3, 8), lam(0xf2
 const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), lam(0xffffff)); helmet.position.y = 1.2; player.add(helmet);
 const canShell = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.7, 0.5), lam(0x555b63)); canShell.position.set(-0.42, 0.7, 0); player.add(canShell);
 const canFill = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1, 0.52), lam(0xFF9F43)); canFill.position.set(-0.43, 0.35, 0); player.add(canFill);
-let toolGroup = null, toolKey = '', rackTool = null, rackKey = '';
-function buildTool(tier, w) {
+let toolGroup = null, toolKey = '', rackTool = null, rackKey = '', bobObj = body, bobY = 0.6, astro = null;
+// tool along local +x (= facing): handle from the hand to the head at `reach` (same value the sim sweeps with), head `w` tiles wide
+function buildTool(tier, w, reach) {
   const g = new THREE.Group(), grey = lam(0xd7dbe0), org = lam(0xFF9F43), cy = lam(0x3EE6FF);
   const box = (sx, sy, sz, x, y, z, m) => { const b = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), m); b.position.set(x, y, z); g.add(b); return b; };
-  if (tier === 0) { box(0.9, 0.05, 0.07, 0.6, 0.5, 0, grey).rotation.z = -0.35; box(0.28, 0.08, 0.22, 1.02, 0.32, 0, grey); box(0.26, 0.06, 0.2, 1.02, 0.25, 0, cy); }
-  else if (tier === 1) { box(0.38, 0.16, 0.8, 0.8, 0.14, 0, org); box(0.36, 0.06, 0.78, 0.8, 0.03, 0, grey); }
-  else {
-    box(1.0, 0.06, 0.06, 0.55, 0.5, 0, grey).rotation.z = -0.5;
-    if (tier === 2) for (let k = 0; k < 8; k++) box(0.3, 0.04, 0.05, 1.05, 0.05, (k / 7 - 0.5) * w * 0.9, grey);
-    else { box(0.24, 0.16, w * 0.95, 1.0, 0.12, 0, org); box(0.12, 0.06, w * 0.95, 1.12, 0.03, 0, grey); }
-    if (tier >= 4) { const pack = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.6, 6), cy); pack.position.set(-0.7, 0.75, 0); g.add(pack); }
+  const hx = reach, hy = 0.12, ax = 0.22, ay = 0.75, hw = w * 0.95;
+  if (ASSETS) { // toy head from the GLB (unit width, scaled across the facing) + round handle
+    const hd = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, Math.hypot(hx - ax, ay - hy), 6), ASSETS.toonMat(0xd7dbe0)); hd.position.set((ax + hx) / 2, (ay + hy) / 2, 0); hd.rotation.z = Math.atan2(hx - ax, ay - hy); g.add(hd);
+    const head = ASSETS.clone('tool' + Math.min(tier, 4)); head.position.x = hx; head.scale.z = hw; g.add(head);
+    if (tier >= 4) { const pk = ASSETS.clone('vacpack'); pk.position.x = -0.62; g.add(pk); }
+    return g;
   }
+  box(Math.hypot(hx - ax, ay - hy), 0.06, 0.06, (ax + hx) / 2, (ay + hy) / 2, 0, grey).rotation.z = -Math.atan2(ay - hy, hx - ax);
+  if (tier === 0) { box(0.26, 0.06, hw, hx, 0.17, 0, cy); box(0.22, 0.12, hw, hx, 0.06, 0, grey); }
+  else if (tier === 1) { box(0.4, 0.14, hw, hx, 0.15, 0, org); box(0.36, 0.06, hw, hx, 0.04, 0, grey); }
+  else if (tier === 2) { box(0.12, 0.08, hw, hx, 0.16, 0, org); for (let k = 0; k < 9; k++) box(0.34, 0.04, 0.06, hx, 0.04, (k / 8 - 0.5) * hw, grey); }
+  else { box(0.24, 0.16, hw, hx, 0.14, 0, org); box(0.14, 0.06, hw, hx + 0.04, 0.03, 0, grey); }
+  if (tier >= 4) { const pack = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.6, 6), cy); pack.position.set(-0.7, 0.75, 0); g.add(pack); }
   return g;
 }
-const footprint = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 })); scene.add(footprint);
 // keepers: faceless triangle drones + beam
 const keeperMeshes = [];
-function keeperMesh() { const g = new THREE.Group(); const d = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.55, 3), new THREE.MeshBasicMaterial({ color: 0x3EE6FF })); d.rotation.x = Math.PI; g.add(d); const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.12, 1, 6), new THREE.MeshBasicMaterial({ color: 0x3EE6FF, transparent: true, opacity: 0.5 })); g.add(beam); g.userData.beam = beam; scene.add(g); return g; }
+function keeperMesh() { const g = new THREE.Group(); if (ASSETS) { const k = ASSETS.clone('keeper'); g.add(k); g.userData.model = k; } if (!ASSETS) { const d = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.55, 3), new THREE.MeshBasicMaterial({ color: 0x3EE6FF })); d.rotation.x = Math.PI; g.add(d); } const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.12, 1, 6), new THREE.MeshBasicMaterial({ color: 0x3EE6FF, transparent: true, opacity: 0.5 })); g.add(beam); g.userData.beam = beam; scene.add(g); return g; }
+// ----- toy assets (assets/sweep-assets.glb, built by assets-src/make_assets.py in Blender) -----
+// Loaded async; until then (or if loading fails) the primitive meshes above stay. Materials become a 3-step toon ramp.
+let ASSETS = null;
+const toonRamp = new THREE.DataTexture(new Uint8Array([110, 190, 255]), 3, 1, THREE.RedFormat); toonRamp.magFilter = toonRamp.minFilter = THREE.NearestFilter; toonRamp.needsUpdate = true;
+const toonCache = new Map();
+function toonOf(m) {
+  const key = m.name + ':' + m.color.getHexString(); if (toonCache.has(key)) return toonCache.get(key);
+  const t = m.name === 'visor' ? new THREE.MeshPhongMaterial({ color: m.color, specular: 0x9ab0c8, shininess: 80 })
+    : new THREE.MeshToonMaterial({ color: m.color, gradientMap: toonRamp, emissive: m.emissive, emissiveIntensity: m.emissive && m.emissive.getHex() ? 0.9 : 0 });
+  t.name = m.name; toonCache.set(key, t); return t;
+}
+function useAssets(gltf) {
+  const lib = {};
+  gltf.scene.traverse(o => { if (o.isMesh) o.material = toonOf(o.material); });
+  for (const c of [...gltf.scene.children]) lib[c.name] = c;
+  ASSETS = {
+    clone: n => lib[n].clone(true),
+    toonMat: hex => toonOf(Object.assign(new THREE.MeshLambertMaterial({ color: hex }), { name: 'c' + hex })),
+  };
+  const hideAll = g => g.children.forEach(c => { c.visible = false; });
+  const place = (n, x, z, ry = 0, parent = scene) => { const o = ASSETS.clone(n); o.position.set(x, 0, z); o.rotation.y = ry; parent.add(o); return o; };
+  // astronaut replaces capsule + sphere + box pack; the orange load bar becomes a slim gauge beside the canister
+  body.visible = helmet.visible = canShell.visible = false;
+  astro = ASSETS.clone('astronaut'); player.add(astro); bobObj = astro.getObjectByName('astro_body'); bobY = 0;
+  canFill.geometry = new THREE.BoxGeometry(0.07, 1, 0.22); canFill.position.x = -0.54; bobObj.add(canFill);
+  hideAll(depot); depot.userData.model = place('depot', DEPOT.c + 2, DEPOT.r + 2);
+  place('rover', DEPOT.c + 4.5, DEPOT.r + 3.4, 0.6).scale.setScalar(0.8);
+  place('refinery', refinery.position.x, refinery.position.z);
+  hideAll(rocket); place('launchpad', rocket.position.x, rocket.position.z); const rk = ASSETS.clone('rocket'); rocket.add(rk);
+  rocketNose = rk.getObjectByName('rnose'); rocketNose.material = rocketNose.material.clone(); rocketNose.material.color.setHex(0xFF9F43);
+  termBox.visible = false; place('terminal', termBox.position.x, termBox.position.z, -Math.PI / 2);
+  rack.visible = false; place('rack', rack.position.x, rack.position.z, -Math.PI / 2);
+  hideAll(crewBay); place('hangar', ZONES.crew.c + 1.5, ZONES.crew.r - 0.7, -Math.PI / 2, crewBay);
+  const arch = ASSETS.clone('gate'); arch.position.y = -0.05; gatePad.add(arch);
+  for (const z of Object.values(ZONES)) { const rim = ASSETS.clone('pad'); rim.getObjectByName('pfloor').visible = false; rim.scale.set(z.w, 1, z.h); rim.position.y = -0.04; z.pad.add(rim); }
+  toolKey = rackKey = ''; keeperMeshes.splice(0).forEach(m => scene.remove(m)); // rebuilt next frame with the toy models
+  SP.assets = 'glb';
+}
+SP.assets = 'loading';
+new GLTFLoader().load('assets/sweep-assets.glb', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+// code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
+const anim = { squash: 0, lastCan: 0, sweepT: 0 };
+function animatePlayer(S, p, dt) {
+  const walk = p.moving ? Math.sin(S.t * 14) : 0;
+  bobObj.position.y = bobY + Math.abs(walk) * 0.06; bobObj.rotation.x = astro ? walk * 0.08 : 0;
+  if (S.can < anim.lastCan - 1e-6 && anim.lastCan - S.can > 0.05) anim.squash = 0.3; // sold at the Depot
+  if (S.can > anim.lastCan + 1e-9) anim.sweepT = 0.25; anim.lastCan = S.can;
+  anim.squash = Math.max(0, anim.squash - dt); anim.sweepT = Math.max(0, anim.sweepT - dt);
+  const q = Math.sin(Math.PI * anim.squash / 0.3) * (anim.squash > 0 ? 1 : 0);
+  if (astro) astro.scale.set(1 + q * 0.12, 1 - q * 0.2, 1 + q * 0.12);
+  const dm = depot.userData.model; if (dm) dm.scale.set(1 + q * 0.04, 1 - q * 0.07, 1 + q * 0.04);
+  if (toolGroup) { const wob = anim.sweepT > 0 ? 1 : 0; toolGroup.rotation.x = wob * Math.sin(S.t * 22) * 0.12; toolGroup.rotation.y = wob * Math.sin(S.t * 11) * 0.05; }
+}
 // Lit pop: pool of raised cyan slabs (scale 1.0 -> 1.08 -> 1.0, rise and fall)
 const POP_MAX = 64, popMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 0.1, 1), new THREE.MeshBasicMaterial({ color: 0x9ff4ff }), POP_MAX); popMesh.frustumCulled = false; scene.add(popMesh);
 // storm: wall of dust points
@@ -231,6 +321,7 @@ let shake = 0;
 function updateWorld(S, realDt) {
   const p = S.player, k = zoomK(S), yaw = CAM.yawDeg * Math.PI / 180, pitch = CAM.pitchDeg * Math.PI / 180;
   groundMat.uniforms.uTime.value = S.t;
+  syncMask(S);
   writeTiles(S);
   // camera: smooth follow, zoom-out with tool width, pull back to the planet on intro / every 10% Moon
   const a = 1 - Math.exp(-CAM.follow * realDt);
@@ -245,14 +336,13 @@ function updateWorld(S, realDt) {
   camera.lookAt(tx, 0, tz);
   // player
   player.position.set(p.x, 0, p.y); player.rotation.y = -p.face;
-  body.position.y = 0.6 + (p.moving ? Math.abs(Math.sin(S.t * 14)) * 0.06 : 0);
-  const w = toolWidth(S), key = S.tool + ':' + w; if (key !== toolKey) { toolKey = key; if (toolGroup) player.remove(toolGroup); toolGroup = buildTool(S.tool, w); player.add(toolGroup); }
+  animatePlayer(S, p, realDt);
+  const w = toolWidth(S), key = S.tool + ':' + w; if (key !== toolKey) { toolKey = key; if (toolGroup) player.remove(toolGroup); toolGroup = buildTool(S.tool, w, S.cfg.tools[S.tool].reach || 0.9); player.add(toolGroup); }
   const nt = S.cfg.tools[S.tool + 1], rk = nt ? String(S.tool + 1) : '';
-  if (rk !== rackKey) { rackKey = rk; if (rackTool) scene.remove(rackTool); rackTool = nt ? buildTool(S.tool + 1, nt.width) : null; if (rackTool) { rackTool.position.set(ZONES.tool.c + 0.6, 0.6, ZONES.tool.r + ZONES.tool.h); rackTool.rotation.z = 0.9; scene.add(rackTool); } }
+  if (rk !== rackKey) { rackKey = rk; if (rackTool) scene.remove(rackTool); rackTool = nt ? buildTool(S.tool + 1, nt.width, nt.reach || 0.9) : null; if (rackTool) { rackTool.position.set(ZONES.tool.c + 0.6, 0.6, ZONES.tool.r + ZONES.tool.h); rackTool.rotation.z = 0.9; scene.add(rackTool); } }
   if (rackTool) rackTool.rotation.y = S.t;
   const ck = clamp(S.can / capKg(S), 0, 1), full = ck >= 0.999;
   canFill.scale.y = Math.max(0.001, ck * 0.7); canFill.position.y = 0.35 + ck * 0.35; canFill.material.color.setHex(full && Math.sin(S.t * 12) > 0 ? 0xff5a3a : 0xFF9F43);
-  const o = -Math.floor((w - 1) / 2); footprint.scale.set(w, 1, w); footprint.position.set(p.tc + o + w / 2, 0.03, p.tr + o + w / 2);
   // keepers
   while (keeperMeshes.length < S.keepers.length) keeperMeshes.push(keeperMesh());
   keeperMeshes.forEach((m, i) => {
@@ -262,7 +352,7 @@ function updateWorld(S, realDt) {
   });
   // Depot / Refinery / Launch Pad / pads
   const fk = S.fuel / S.cfg.refinery.tankKg; fuelFill.scale.y = Math.max(0.001, fk * 2.2); fuelFill.position.y = 0.1 + fk * 1.1;
-  const ready = canLaunch(S); rocket.children[2].material.color.setHex(ready && Math.sin(S.t * 6) > 0 ? 0xFFD45E : 0xFF9F43); rocket.position.y = ready ? Math.abs(Math.sin(S.t * 3)) * 0.15 : 0;
+  const ready = canLaunch(S); rocketNose.material.color.setHex(ready && Math.sin(S.t * 6) > 0 ? 0xFFD45E : 0xFF9F43); rocket.position.y = ready ? Math.abs(Math.sin(S.t * 3)) * 0.15 : 0;
   const g = nextGate(S); gatePad.visible = gateFill.visible = gateLabel.visible = g > 0;
   if (g > 0) {
     const pd = PADS[g], cost = gateCost(S, g), paid = clamp(S.gatePaid / cost, 0, 1), pulse = 0.5 + 0.5 * Math.sin(S.t * 6);
@@ -341,7 +431,7 @@ function playSfx(kind, n) {
 
 // ----- input: joystick anywhere (screen direction rotated by camera yaw), WASD -----
 const keys = {}; let joy = null;
-addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if (e.key === 't' || e.key === 'T') document.getElementById('btnPanel').click(); });
+addEventListener('keydown', e => { if (e.key === '`') { toggleCheat(); return; } keys[e.key.toLowerCase()] = true; if (e.key === 't' || e.key === 'T') document.getElementById('btnPanel').click(); });
 addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 function inputVec() {
   let x = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0), y = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
@@ -372,6 +462,7 @@ ui.addEventListener('pointerdown', e => {
     if (inRect(p, POP_BTN[0]) || inRect(p, POP_BTN[1])) { const m = inRect(p, POP_BTN[1]) ? 2 : 1; G.cash += G.popup.cash * m; G.earned += G.popup.cash * m; G.popup = null; }
     return;
   }
+  if (p.y < HUD_H && p.x < 120) { const now = performance.now(); cheatTaps = cheatTaps.filter(t => now - t < 2000); cheatTaps.push(now); if (cheatTaps.length >= 5) { cheatTaps = []; toggleCheat(); } return; }
   for (const [id, b] of Object.entries(HUD_BTN)) if ((id === 'shop' || G.stardust > 0) && inRect(p, b)) { toast = { text: b.label + ': not in greybox', until: performance.now() + 1500 }; return; }
   const sid = activeSheet(G);
   if (sid && p.y >= H - SHEETS[sid].h) {
@@ -455,6 +546,7 @@ function drawOverlay(S) {
   ctx.fillStyle = 'rgba(21,24,29,.92)'; ctx.fillRect(0, 0, W, HUD_H);
   ctx.textAlign = 'left'; ctx.font = 'bold 19px system-ui'; ctx.fillStyle = '#FFD45E'; ctx.fillText('$' + fmt(S.cash), 10, 24);
   ctx.font = '11px system-ui'; ctx.fillStyle = '#3EE6FF'; ctx.fillText('+$' + fmt(S.rate) + '/s', 10, 40);
+  if (S.tele.cheats) { ctx.fillStyle = '#ff7a5a'; ctx.font = 'bold 9px system-ui'; ctx.fillText('CHEAT', 88, 54); ctx.textAlign = 'left'; }
   ctx.fillStyle = '#666'; ctx.font = '9px system-ui'; ctx.fillText(mmss(S.t) + (speed > 1 ? ' x' + speed : '') + ' · ' + fps + 'fps', 10, 54);
   ctx.textAlign = 'center'; ctx.font = 'bold 15px system-ui'; ctx.fillStyle = '#fff'; ctx.fillText('Moon ' + moonPct(S, 1) + '%', 195, 19);
   bar(130, 25, 130, 8, S.everCount / SWEEPABLE, '#3EE6FF');
@@ -507,6 +599,36 @@ function activeFtue(S) {
   return null;
 }
 
+// ----- cheat panel (testing / demo): 5 quick taps on the cash counter, or the ` key, or the button in the tuning panel -----
+// Every cheat is logged in S.tele.cheats (shown in telemetry, Copy JSON, console) and the HUD shows a red CHEAT tag.
+let cheatTaps = [];
+const cheatEl = document.getElementById('cheat');
+function cheat(name, fn) { fn(G); if (name !== 'Game Reset') (G.tele.cheats ??= []).push({ name, t: +G.t.toFixed(1) }); // a reset starts a clean, unmarked game
+  console.log('[cheat]', name, 'at', mmss(G.t)); buildCheat(); }
+function stormNow(S) { const st = S.storm; if (st.phase === 'blow') return; if (st.phase === 'idle') { st.next = S.t; step(S, 0.001, null); } if (st.phase === 'warn') st.blowAt = S.t; }
+function giveKeeper(S) { S.crewOpen = true; const c = costOf(S, 'keeper'); if (c == null) return; S.cash += c; buy(S, 'keeper'); }
+const CHEATS = [
+  ['Cash', [['×10', S => { S.cash = Math.max(100, S.cash * 10); }], ['+1M', S => { S.cash += 1e6; }]]],
+  ['Fuel', [['Full tank', S => { S.fuel = S.cfg.refinery.tankKg; }]]],
+  ['Sectors', [['Unlock all', S => { S.unlocked = S.unlocked.map(() => true); S.gatePaid = 0; }]]],
+  ['Tool tier', CONFIG.tools.map((t, k) => [(k + 1) + ' ' + t.id, S => { S.tool = k; S.tele.tierAt[k] ??= S.t; }])],
+  ['Crew', [['+Keeper', giveKeeper]]],
+  ['Storm', [['Dust Storm now', stormNow]]],
+  ['Time', [1, 4, 10].map(x => ['×' + x, () => { speed = x; }])],
+  ['Offline', [['Skip 1 hour', S => skipOffline(S, 60)]]],
+  ['Launch', [['Launch now', S => { S.popup = Object.assign({ kind: 'launch' }, launch(S)); }]]],
+  ['Game', [['Reset', () => { G = startGame(); camState.init = false; }]]],
+];
+function buildCheat() {
+  if (cheatEl.style.display !== 'block') return;
+  cheatEl.innerHTML = '<h3>CHEATS (testing) <button id="cClose">✕</button></h3>' +
+    CHEATS.map(([g, list], gi) => '<div class="row"><b>' + g + ':</b> ' + list.map(([l], li) => `<button data-c="${gi}:${li}" class="${g === 'Time' && speed === +l.slice(1) ? 'on' : g === 'Tool tier' && G.tool === li ? 'on' : ''}">${l}</button>`).join('') + '</div>').join('') +
+    '<small>Open: tap the cash counter 5× fast (phone) or press ` (desktop). Used this session: ' + ((G.tele.cheats || []).map(c => c.name).join(', ') || 'none') + '</small>';
+  cheatEl.querySelector('#cClose').onclick = toggleCheat;
+  cheatEl.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { const [gi, li] = b.dataset.c.split(':').map(Number), [g, list] = CHEATS[gi]; cheat(g + ' ' + list[li][0], list[li][1]); });
+}
+function toggleCheat() { cheatEl.style.display = cheatEl.style.display === 'block' ? 'none' : 'block'; buildCheat(); }
+
 // ----- tuning panel (same tools as 2D) -----
 function startGame(keep) { const S = newGame(CONFIG, keep); S.sfxFn = playSfx; S.payFlow = true; S.zonePaid = {}; return S; }
 let G = startGame(), speed = 1, fps = 0;
@@ -514,6 +636,7 @@ const panel = document.getElementById('panel');
 function buildPanel() {
   let h = '<h3>Time</h3>' + [1, 4, 10].map(s => `<button data-speed="${s}" class="${speed === s ? 'on' : ''}">x${s}</button>`).join('') +
     `<button id="bReset">Reset</button><button id="bSkip">Skip 1 hour (offline)</button><button id="bCash">+$1000</button><button id="bSnd" class="${soundOn ? 'on' : ''}">Sound</button><button id="bZoom">Zoom to planet</button>`;
+  h += '<button id="bCheat">Cheats (` or tap cash 5×)</button>';
   h += '<h3>Camera</h3>' + ['pitchDeg', 'yawDeg', 'dist', 'fov'].map(k => `<label style="display:flex;justify-content:space-between">${k} <input type="number" step="any" data-cam="${k}" value="${CAM[k]}" style="width:70px"></label>`).join('');
   h += '<h3>Telemetry (this session)</h3><pre id="tele"></pre><button id="bCopy">Copy JSON</button>';
   h += '<h3>Bot (headless, seeds 1-3; same sim as 2D)</h3><button id="bBot">Run GB1-GB4 report</button><div id="botOut"></div>';
@@ -522,19 +645,20 @@ function buildPanel() {
   panel.innerHTML = h;
   panel.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; buildPanel(); });
   panel.querySelectorAll('[data-cam]').forEach(i => i.onchange = () => { CAM[i.dataset.cam] = +i.value; camera.fov = CAM.fov; camera.updateProjectionMatrix(); });
+  panel.querySelector('#bCheat').onclick = () => { panel.style.display = 'none'; toggleCheat(); };
   panel.querySelector('#bReset').onclick = () => { G = startGame(); camState.init = false; };
   panel.querySelector('#bSkip').onclick = () => { skipOffline(G, 60); panel.style.display = 'none'; };
   panel.querySelector('#bCash').onclick = () => { G.cash += 1000; };
   panel.querySelector('#bSnd').onclick = () => { soundOn = !soundOn; buildPanel(); };
   panel.querySelector('#bZoom').onclick = () => { G.zoomAt = G.t; panel.style.display = 'none'; };
-  panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G) }, null, 1));
+  panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G), cheats: G.tele.cheats || [] }, null, 1));
   const apply = reset => { try { const v = JSON.parse(panel.querySelector('#cfg').value); for (const k of Object.keys(CONFIG)) delete CONFIG[k]; Object.assign(CONFIG, v); panel.querySelector('#cfgErr').textContent = ' applied'; if (reset) G = startGame(); } catch (e) { panel.querySelector('#cfgErr').textContent = ' ' + e.message; } };
   panel.querySelector('#bApply').onclick = () => apply(false); panel.querySelector('#bApplyReset').onclick = () => apply(true);
   panel.querySelector('#bBot').onclick = () => { const out = panel.querySelector('#botOut'); out.textContent = 'running (±10-30 s)...'; setTimeout(() => { const r = botReport(); delete r.runs; out.innerHTML = '<pre>' + JSON.stringify(r, null, 1) + '</pre>'; console.log('[bot]', r); }, 30); };
 }
 function teleText(S) {
   const T = teleSummary(S);
-  let s = `first lit ${mmss(T.firstLit)} | first upgrade ${mmss(T.firstUpgrade)} (GB1 <= 1:00)\nkeeper#1 ${mmss(T.keeper1)} | tier3 ${mmss(T.tier3)} | tier4 ${mmss(T.tier4)} | tier5 ${mmss(T.tier5)}\nlaunch ${mmss(T.launchAt)} (GB3 22-32 min) | Lit>sell from min ${T.litBeatsSellMin ?? '–'} (GB2 4-7)\nuptime: 3+ keepers ${T.uptimeK3 ?? '–'}% | 0 keepers ${T.uptimeK0 ?? '–'}% | storms ${T.storms}\n\n min   lit$  sell$  up%  tiles moon\n`;
+  let s = (S.tele.cheats ? 'CHEATS USED: ' + S.tele.cheats.map(c => c.name + ' @' + mmss(c.t)).join(', ') + '\n' : '') + `first lit ${mmss(T.firstLit)} | first upgrade ${mmss(T.firstUpgrade)} (GB1 <= 1:00)\nkeeper#1 ${mmss(T.keeper1)} | tier3 ${mmss(T.tier3)} | tier4 ${mmss(T.tier4)} | tier5 ${mmss(T.tier5)}\nlaunch ${mmss(T.launchAt)} (GB3 22-32 min) | Lit>sell from min ${T.litBeatsSellMin ?? '–'} (GB2 4-7)\nuptime: 3+ keepers ${T.uptimeK3 ?? '–'}% | 0 keepers ${T.uptimeK0 ?? '–'}% | storms ${T.storms}\n\n min   lit$  sell$  up%  tiles moon\n`;
   for (const m of T.minutes.slice(-15)) s += `${String(m.m).padStart(4)} ${String(m.lit).padStart(6)} ${String(m.sell).padStart(6)} ${String(m.up ?? '–').padStart(4)} ${String(m.litTiles ?? '').padStart(6)} ${String(m.moon ?? '').padStart(5)}\n`;
   return s;
 }
@@ -561,7 +685,7 @@ function selfTest3d() {
 }
 const selfTestResult = selfTest3d();
 console.log('[selfTest]', selfTestResult);
-Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.assign(SP, { updateWorld, drawOverlay, stepPayZones, moneyFlows, ZONES, selfTest3d, renderer, scene, camera, inputVec, CAM });
+Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.assign(SP, { animatePlayer, maskStats, toggleCheat, CHEATS, cheat, updateWorld, drawOverlay, stepPayZones, moneyFlows, ZONES, selfTest3d, renderer, scene, camera, inputVec, CAM });
 
 let last = performance.now(), teleTimer = 0, logMin = 0, fpsN = 0, fpsT = 0;
 function frame(now) {

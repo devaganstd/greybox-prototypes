@@ -28,13 +28,19 @@
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
 // Camera, world, player, workers and storm are 3D; HUD, joystick and popups are a 2D overlay canvas.
-// Upgrades are in-world for now: walk onto the UPGRADES pad to open the terminal sheet; gate pads are pay zones (stand = cash flows).
+// World vs UI split follows 01_riset/batch7c-ui-vs-inworld-upgrade-2026-11-20.md §5-6:
+//   cash, dust and space = in-world (sell at Depot, pay zones for sector gates, tool tiers, Keeper hire), cash visibly flows;
+//   number choices = small panel opened by standing on a pad (terminal: 5 stat branches; Refinery: Fuel share; Launch: confirm);
+//   meta/progress = HUD (cash + $/s, Moon % bar + Grid %, Shop, later Fuel / Star Map).
 import * as THREE from './lib/three.module.min.js';
-const W = 390, H = 844, HUD_H = 64;
-// in-world zones (tile coords). Edit here after the UI-vs-in-world research (01_riset/batch7c-...).
+const W = 390, H = 844, HUD_H = 60;
+// in-world pads (tile coords, all outside the Depot rect so they never trigger a sale). kind: 'panel' opens a sheet, 'pay' is a pay zone.
 const ZONES = {
-  terminal: { c: 3, r: 62, w: 3, h: 3, label: 'UPGRADES', color: 0x3EE6FF }, // standing inside opens the upgrade sheet
-  sell: { c: DEPOT.c, r: DEPOT.r, w: 4, h: 4, label: 'SELL' },                 // Depot: walking in sells the canister (sim rule)
+  terminal: { c: 3, r: 62, w: 3, h: 3, kind: 'panel', label: 'UPGRADES', bg: '#3EE6FF' },
+  tool: { c: 3, r: 67, w: 3, h: 3, kind: 'pay', label: 'TOOL RACK', bg: '#FFD45E' },
+  crew: { c: 3, r: 57, w: 3, h: 3, kind: 'pay', label: 'CREW BAY', bg: '#7CFFB2' },
+  refinery: { c: 15, r: 64, w: 2, h: 2, kind: 'panel', label: 'REFINERY', bg: '#c77dff' },
+  launch: { c: 15, r: 61, w: 2, h: 2, kind: 'panel', label: 'LAUNCH', bg: '#FF9F43' },
 };
 const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 21, follow: 6, widthZoom: 0.07, planetDist: 175 };
 const errBox = document.getElementById('err');
@@ -116,9 +122,10 @@ const depot = new THREE.Group(); scene.add(depot);
 { const b = new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.6, 3.6), lam(0xd9dee4)); b.position.set(DEPOT.c + 2, 0.8, DEPOT.r + 2); depot.add(b);
   const s = new THREE.Mesh(new THREE.BoxGeometry(3.62, 0.3, 3.62), lam(0xFF9F43)); s.position.set(DEPOT.c + 2, 0.25, DEPOT.r + 2); depot.add(s);
   const hop = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.5, 0.6, 6), lam(0x9aa3ad)); hop.position.set(DEPOT.c + 2, 1.9, DEPOT.r + 2); depot.add(hop); }
-const refinery = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.75, 2.4, 8), lam(0x9aa3ad, { transparent: true, opacity: 0.55 })); refinery.position.set(DEPOT.c + 4.8, 1.2, DEPOT.r + 3); scene.add(refinery);
-const fuelFill = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 1, 8), lam(0xc77dff)); fuelFill.position.set(DEPOT.c + 4.8, 0, DEPOT.r + 3); scene.add(fuelFill);
-const rocket = new THREE.Group(); rocket.position.set(DEPOT.c + 5, 0, DEPOT.r + 0.9); scene.add(rocket);
+const RZ = ZONES.refinery, LZ = ZONES.launch;
+const refinery = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.75, 2.4, 8), lam(0x9aa3ad, { transparent: true, opacity: 0.55 })); refinery.position.set(RZ.c + RZ.w + 0.9, 1.2, RZ.r + 1); scene.add(refinery);
+const fuelFill = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 1, 8), lam(0xc77dff)); fuelFill.position.set(refinery.position.x, 0, refinery.position.z); scene.add(fuelFill);
+const rocket = new THREE.Group(); rocket.position.set(LZ.c + LZ.w + 0.9, 0, LZ.r + 1); scene.add(rocket);
 { const base = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.9, 0.2, 8), lam(0x6b727c)); base.position.y = 0.1; rocket.add(base);
   const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.38, 1.4, 6), lam(0xeef0f4)); body.position.y = 0.9; rocket.add(body);
   const nose = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.7, 6), lam(0xFF9F43)); nose.position.y = 1.95; rocket.add(nose); }
@@ -126,12 +133,21 @@ const rocket = new THREE.Group(); rocket.position.set(DEPOT.c + 5, 0, DEPOT.r + 
 function labelSprite() {
   const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64; const tex = new THREE.CanvasTexture(cv);
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })); sp.scale.set(4, 1, 1); sp.renderOrder = 5;
-  sp.userData.set = (text, bg = '#FFD45E', fg = '#111') => { if (sp.userData.t === text + bg) return; sp.userData.t = text + bg; const c = cv.getContext('2d'); c.clearRect(0, 0, 256, 64); c.fillStyle = bg; c.beginPath(); c.roundRect(8, 8, 240, 48, 24); c.fill(); c.fillStyle = fg; c.font = 'bold 30px system-ui'; c.textAlign = 'center'; c.fillText(text, 128, 43); tex.needsUpdate = true; };
+  sp.userData.set = (text, bg = '#FFD45E', fg = '#111') => { if (sp.userData.t === text + bg) return; sp.userData.t = text + bg; const c = cv.getContext('2d'); c.clearRect(0, 0, 256, 64); c.fillStyle = bg; c.beginPath(); c.roundRect(8, 8, 240, 48, 24); c.fill(); c.fillStyle = fg; let fs = 30; c.font = 'bold 30px system-ui'; while (fs > 14 && c.measureText(text).width > 220) c.font = 'bold ' + (fs -= 2) + 'px system-ui'; c.textAlign = 'center'; c.fillText(text, 128, 32 + fs * 0.36); tex.needsUpdate = true; };
   scene.add(sp); return sp;
 }
-const termPad = new THREE.Mesh(new THREE.BoxGeometry(ZONES.terminal.w, 0.08, ZONES.terminal.h), lam(0x1d5e6c)); termPad.position.set(ZONES.terminal.c + ZONES.terminal.w / 2, 0.04, ZONES.terminal.r + ZONES.terminal.h / 2); scene.add(termPad);
+// one floor pad + floating label per zone; pay zones also get an orange paid-progress fill
+for (const [id, z] of Object.entries(ZONES)) {
+  const col = new THREE.Color(z.bg);
+  z.pad = new THREE.Mesh(new THREE.BoxGeometry(z.w, 0.08, z.h), lam(col.clone().multiplyScalar(0.45))); z.pad.position.set(z.c + z.w / 2, 0.04, z.r + z.h / 2); scene.add(z.pad);
+  z.col = col; z.label3d = labelSprite(); z.label3d.position.set(z.c + z.w / 2, 2.9, z.r + z.h / 2); z.label3d.userData.set(z.label, z.bg);
+  if (z.kind === 'pay') { z.fill = new THREE.Mesh(new THREE.BoxGeometry(z.w, 0.1, z.h), lam(0xFF9F43)); scene.add(z.fill); }
+}
 const termBox = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.2, 0.5), lam(0x3EE6FF)); termBox.position.set(ZONES.terminal.c + ZONES.terminal.w / 2, 0.6, ZONES.terminal.r - 0.1); scene.add(termBox);
-const termLabel = labelSprite(); termLabel.position.set(termBox.position.x, 2.2, termBox.position.z); termLabel.userData.set('UPGRADES', '#3EE6FF');
+const rack = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.0, 0.25), lam(0x6b727c)); rack.position.set(ZONES.tool.c + 1.5, 0.5, ZONES.tool.r + ZONES.tool.h + 0.2); scene.add(rack);
+const crewBay = new THREE.Group(); scene.add(crewBay); // hangar appears after the first storm (Keepers unlock then in the sim)
+{ const hz = ZONES.crew, b = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.3, 1.2), lam(0x9aa3ad)); b.position.set(hz.c + 1.5, 0.65, hz.r - 0.7); crewBay.add(b);
+  const door = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.9, 0.05), lam(0x2a2f37)); door.position.set(hz.c + 1.5, 0.45, hz.r - 0.08); crewBay.add(door); }
 const sellLabel = labelSprite(); sellLabel.position.set(DEPOT.c + 2, 3.0, DEPOT.r + 2); sellLabel.userData.set('SELL', '#ffffff');
 const gatePad = new THREE.Mesh(new THREE.BoxGeometry(2, 0.1, 2), lam(0xFFD45E, { transparent: true, opacity: 0.85 })); scene.add(gatePad);
 const gateFill = new THREE.Mesh(new THREE.BoxGeometry(2, 0.14, 2), lam(0xFF9F43)); scene.add(gateFill);
@@ -143,9 +159,8 @@ const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.45, 3, 8), lam(0xf2
 const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), lam(0xffffff)); helmet.position.y = 1.2; player.add(helmet);
 const canShell = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.7, 0.5), lam(0x555b63)); canShell.position.set(-0.42, 0.7, 0); player.add(canShell);
 const canFill = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1, 0.52), lam(0xFF9F43)); canFill.position.set(-0.43, 0.35, 0); player.add(canFill);
-let toolGroup = null, toolKey = '';
+let toolGroup = null, toolKey = '', rackTool = null, rackKey = '';
 function buildTool(tier, w) {
-  if (toolGroup) player.remove(toolGroup);
   const g = new THREE.Group(), grey = lam(0xd7dbe0), org = lam(0xFF9F43), cy = lam(0x3EE6FF);
   const box = (sx, sy, sz, x, y, z, m) => { const b = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), m); b.position.set(x, y, z); g.add(b); return b; };
   if (tier === 0) { box(0.9, 0.05, 0.07, 0.6, 0.5, 0, grey).rotation.z = -0.35; box(0.28, 0.08, 0.22, 1.02, 0.32, 0, grey); box(0.26, 0.06, 0.2, 1.02, 0.25, 0, cy); }
@@ -156,7 +171,7 @@ function buildTool(tier, w) {
     else { box(0.24, 0.16, w * 0.95, 1.0, 0.12, 0, org); box(0.12, 0.06, w * 0.95, 1.12, 0.03, 0, grey); }
     if (tier >= 4) { const pack = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.6, 6), cy); pack.position.set(-0.7, 0.75, 0); g.add(pack); }
   }
-  player.add(g); toolGroup = g;
+  return g;
 }
 const footprint = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 })); scene.add(footprint);
 // keepers: faceless triangle drones + beam
@@ -169,6 +184,24 @@ const STORM_P = 1400, stormGeo = new THREE.BufferGeometry(), stormPos = new Floa
 for (let i = 0; i < STORM_P * 3; i++) stormSeed[i] = Math.random();
 stormGeo.setAttribute('position', new THREE.BufferAttribute(stormPos, 3));
 const stormPts = new THREE.Points(stormGeo, new THREE.PointsMaterial({ color: 0xb4b2ac, size: 0.16, transparent: true, opacity: 0.8 })); stormPts.frustumCulled = false; scene.add(stormPts);
+
+// visible flows: coins (player -> pay zone, Depot -> player) and dust (canister -> Depot), one InstancedMesh pool
+const FLOW_MAX = 96, flowMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.22, 0.06, 0.22), new THREE.MeshBasicMaterial(), FLOW_MAX), flows = [];
+flowMesh.frustumCulled = false; scene.add(flowMesh);
+for (let i = 0; i < FLOW_MAX; i++) flowMesh.setColorAt(i, new THREE.Color(0xFFD45E));
+function flow(ax, az, bx, bz, color, delay = 0, dur = 0.45) { if (flows.length < FLOW_MAX) flows.push({ ax, az, bx, bz, color, t: -delay, dur }); }
+const tmpC = new THREE.Color();
+function stepFlows(dt) {
+  let n = 0;
+  for (let i = flows.length - 1; i >= 0; i--) { const f = flows[i]; f.t += dt; if (f.t >= f.dur) { flows.splice(i, 1); continue; } }
+  for (const f of flows) {
+    if (f.t < 0) continue; const k = f.t / f.dur;
+    tmpV.set(lerp(f.ax, f.bx, k), 1.0 + Math.sin(Math.PI * k) * 1.4, lerp(f.az, f.bz, k)); tmpM.compose(tmpV, tmpQ.setFromEuler(new THREE.Euler(0, k * 6, 0)), tmpS.set(1, 1, 1));
+    flowMesh.setMatrixAt(n, tmpM); flowMesh.setColorAt(n, tmpC.setHex(f.color)); n++;
+  }
+  tmpM.makeScale(0, 0, 0); for (let k = n; k < FLOW_MAX; k++) flowMesh.setMatrixAt(k, tmpM);
+  flowMesh.instanceMatrix.needsUpdate = true; flowMesh.instanceColor.needsUpdate = true;
+}
 
 // ----- per-frame world update -----
 const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3(), tmpS = new THREE.Vector3();
@@ -213,7 +246,10 @@ function updateWorld(S, realDt) {
   // player
   player.position.set(p.x, 0, p.y); player.rotation.y = -p.face;
   body.position.y = 0.6 + (p.moving ? Math.abs(Math.sin(S.t * 14)) * 0.06 : 0);
-  const w = toolWidth(S), key = S.tool + ':' + w; if (key !== toolKey) { toolKey = key; buildTool(S.tool, w); }
+  const w = toolWidth(S), key = S.tool + ':' + w; if (key !== toolKey) { toolKey = key; if (toolGroup) player.remove(toolGroup); toolGroup = buildTool(S.tool, w); player.add(toolGroup); }
+  const nt = S.cfg.tools[S.tool + 1], rk = nt ? String(S.tool + 1) : '';
+  if (rk !== rackKey) { rackKey = rk; if (rackTool) scene.remove(rackTool); rackTool = nt ? buildTool(S.tool + 1, nt.width) : null; if (rackTool) { rackTool.position.set(ZONES.tool.c + 0.6, 0.6, ZONES.tool.r + ZONES.tool.h); rackTool.rotation.z = 0.9; scene.add(rackTool); } }
+  if (rackTool) rackTool.rotation.y = S.t;
   const ck = clamp(S.can / capKg(S), 0, 1), full = ck >= 0.999;
   canFill.scale.y = Math.max(0.001, ck * 0.7); canFill.position.y = 0.35 + ck * 0.35; canFill.material.color.setHex(full && Math.sin(S.t * 12) > 0 ? 0xff5a3a : 0xFF9F43);
   const o = -Math.floor((w - 1) / 2); footprint.scale.set(w, 1, w); footprint.position.set(p.tc + o + w / 2, 0.03, p.tr + o + w / 2);
@@ -234,7 +270,15 @@ function updateWorld(S, realDt) {
     gateFill.scale.set(Math.max(0.001, paid), 1, 1); gateFill.position.set(pd.c + paid, 0.07, pd.r + pd.h / 2);
     gateLabel.position.set(pd.c + pd.w / 2, 1.6, pd.r + pd.h / 2); gateLabel.userData.set('$' + fmt(cost - S.gatePaid));
   }
-  termPad.material.color.setHex(inZone(S, ZONES.terminal) ? 0x3EE6FF : 0x1d5e6c);
+  crewBay.visible = ZONES.crew.pad.visible = ZONES.crew.label3d.visible = S.crewOpen;
+  for (const [id, z] of Object.entries(ZONES)) {
+    const on = inZone(S, z); z.pad.material.color.copy(z.col).multiplyScalar(on ? 1 : 0.45);
+    if (z.kind !== 'pay') continue;
+    const pz = PAYZ[id], ok = pz.ok(S), cost = ok ? pz.cost(S) : 0, paid = ok && cost > 0 ? clamp((S.zonePaid[id] || 0) / cost, 0, 1) : 0;
+    z.fill.visible = z.pad.visible && paid > 0; z.fill.scale.set(Math.max(0.001, paid), 1, 1); z.fill.position.set(z.c + z.w * paid / 2, 0.06, z.r + z.h / 2);
+    if (z.pad.visible) z.label3d.userData.set(!ok ? (id === 'tool' ? 'MAX TOOL' : 'CREW FULL') : cost === 0 ? 'FREE' : (id === 'tool' ? pz.name(S) + ' ' : 'Keeper ') + '$' + fmt(cost - (S.zonePaid[id] || 0)), cost === 0 && ok ? '#7CFFB2' : z.bg);
+  }
+  stepFlows(realDt);
   // storm wall
   stormPts.visible = st.phase === 'blow';
   if (stormPts.visible) {
@@ -246,7 +290,37 @@ function updateWorld(S, realDt) {
   moon.visible = true;
 }
 const inZone = (S, z) => inRectT(S.player.x, S.player.y, z);
+// pay zones handled in this layer (sector gates are a pay zone inside the sim). Same rule as the sim gate: cash drains over
+// ui.payZoneSec, paid part is kept when walking off, on full payment it is refunded and the normal buy() runs, so the
+// economy, telemetry and bot (which calls buy() directly) are unchanged.
+const PAYZ = {
+  tool: { ok: S => !!S.cfg.tools[S.tool + 1], cost: S => S.cfg.tools[S.tool + 1].cost, name: S => S.cfg.tools[S.tool + 1].id, done: S => buy(S, 'tool') },
+  crew: { ok: S => costOf(S, 'keeper') != null, cost: S => costOf(S, 'keeper'), done: S => buy(S, 'keeper') },
+};
+function stepPayZones(S, dt) {
+  for (const [id, pz] of Object.entries(PAYZ)) {
+    if (!pz.ok(S) || !inZone(S, ZONES[id])) continue;
+    const cost = pz.cost(S), paid = S.zonePaid[id] || 0, pay = Math.min(S.cash, cost * dt / S.cfg.ui.payZoneSec, cost - paid);
+    S.cash -= pay; S.zonePaid[id] = paid + pay;
+    if (S.zonePaid[id] >= cost - 1e-6) { S.cash += cost; S.zonePaid[id] = 0; pz.done(S); }
+  }
+}
 const toScreen = (x, y, z) => { tmpV.set(x, y, z).project(camera); return { x: (tmpV.x + 1) / 2 * W, y: (1 - tmpV.y) / 2 * H, behind: tmpV.z > 1 }; };
+
+// visible money: dust out of the canister into the Depot + coins back on a sale; coins from the player into any pay zone while paying
+const flowPrev = { can: 0, paid: 0, coinT: 0 };
+function moneyFlows(S, dt) {
+  const p = S.player, hop = { x: DEPOT.c + 2, z: DEPOT.r + 2 };
+  if (S.can < flowPrev.can - 1e-6 && inRectT(p.x, p.y, DEPOT)) for (let i = 0; i < 8; i++) { flow(p.x, p.y, hop.x, hop.z, 0x9aa3ad, i * 0.03); flow(hop.x, hop.z, p.x, p.y, 0xFFD45E, 0.3 + i * 0.04); }
+  const g = nextGate(S), paid = (S.gatePaid || 0) + Object.values(S.zonePaid || {}).reduce((a, b) => a + b, 0);
+  flowPrev.coinT -= dt;
+  if (paid > flowPrev.paid + 1e-9 && flowPrev.coinT <= 0) {
+    flowPrev.coinT = 0.07;
+    const z = Object.values(ZONES).find(z => z.kind === 'pay' && inZone(S, z)) || (g > 0 && inRectT(p.x, p.y, PADS[g]) ? PADS[g] : null);
+    if (z) flow(p.x, p.y, z.c + z.w / 2, z.r + z.h / 2, 0xFFD45E, 0, 0.35);
+  }
+  flowPrev.can = S.can; flowPrev.paid = paid;
+}
 
 // ----- audio (same beeps as 2D) -----
 let AC = null, soundOn = true;
@@ -278,11 +352,17 @@ function inputVec() {
 }
 const toLocal = e => { const r = ui.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; };
 const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
-const SHEET_Y = 590;
-const BTN = ['capacity', 'width', 'speed', 'payout', 'panelBoost', 'tool', 'keeper', 'fuel'].map((id, i) => ({ id, x: 6 + (i % 4) * 95.5, y: SHEET_Y + 40 + Math.floor(i / 4) * 60, w: 91, h: 54 }));
-const LAUNCH_BTN = { x: 105, y: 520, w: 180, h: 50 }, POP_BTN = [{ x: 60, y: 450, w: 130, h: 56 }, { x: 200, y: 450, w: 130, h: 56 }];
+const POP_BTN = [{ x: 60, y: 450, w: 130, h: 56 }, { x: 200, y: 450, w: 130, h: 56 }];
 const FUEL_STEPS = [0, 0.3, 0.5, 0.7, 1];
-const sheetOpen = S => inZone(S, ZONES.terminal) && !S.popup;
+// panels opened by standing on a pad (batch7c R3): row rects are relative to the sheet top (H - h)
+const SHEETS = {
+  terminal: { h: 290, title: 'UPGRADE TERMINAL', rows: UPS.map((id, i) => ({ id, x: 10, y: 42 + i * 46, w: W - 20, h: 40 })) },
+  refinery: { h: 150, title: 'REFINERY: DUST TO FUEL', rows: FUEL_STEPS.map((v, i) => ({ id: 'fuel', v, x: 10 + i * 75, y: 62, w: 70, h: 46 })) },
+  launch: { h: 160, title: 'LAUNCH PAD', rows: [{ id: 'launch', x: 95, y: 56, w: 200, h: 56 }] },
+};
+const activeSheet = S => !S.popup && Object.keys(SHEETS).find(id => inZone(S, ZONES[id]));
+const HUD_BTN = { shop: { x: 270, y: 10, w: 58, h: 22, label: 'SHOP' }, map: { x: 270, y: 35, w: 58, h: 20, label: 'MAP' } };
+let toast = null;
 ui.addEventListener('pointerdown', e => {
   e.preventDefault();
   if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch { AC = null; } }
@@ -292,9 +372,16 @@ ui.addEventListener('pointerdown', e => {
     if (inRect(p, POP_BTN[0]) || inRect(p, POP_BTN[1])) { const m = inRect(p, POP_BTN[1]) ? 2 : 1; G.cash += G.popup.cash * m; G.earned += G.popup.cash * m; G.popup = null; }
     return;
   }
-  if (canLaunch(G) && inRect(p, LAUNCH_BTN)) { G.popup = Object.assign({ kind: 'launch' }, launch(G)); return; }
-  if (sheetOpen(G) && p.y >= SHEET_Y) {
-    for (const b of BTN) if (inRect(p, b)) { if (b.id === 'fuel') G.fuelShare = FUEL_STEPS[(FUEL_STEPS.indexOf(G.fuelShare) + 1) % FUEL_STEPS.length]; else buy(G, b.id); return; }
+  for (const [id, b] of Object.entries(HUD_BTN)) if ((id === 'shop' || G.stardust > 0) && inRect(p, b)) { toast = { text: b.label + ': not in greybox', until: performance.now() + 1500 }; return; }
+  const sid = activeSheet(G);
+  if (sid && p.y >= H - SHEETS[sid].h) {
+    const top = H - SHEETS[sid].h;
+    for (const b of SHEETS[sid].rows) if (inRect(p, { x: b.x, y: top + b.y, w: b.w, h: b.h })) {
+      if (b.id === 'fuel') G.fuelShare = b.v;
+      else if (b.id === 'launch') { if (canLaunch(G)) G.popup = Object.assign({ kind: 'launch' }, launch(G)); }
+      else buy(G, b.id);
+    }
+    return;
   }
   if (p.y > HUD_H) { joy = { ox: p.x, oy: p.y, x: p.x, y: p.y, id: e.pointerId }; ui.setPointerCapture(e.pointerId); }
 });
@@ -302,16 +389,49 @@ ui.addEventListener('pointermove', e => { if (joy && e.pointerId === joy.id) { c
 const endJoy = e => { if (joy && e.pointerId === joy.id) joy = null; };
 ui.addEventListener('pointerup', endJoy); ui.addEventListener('pointercancel', endJoy);
 
-// ----- 2D overlay: HUD, floating text, goal arrow, terminal sheet, popups -----
+// ----- 2D overlay: HUD (batch7c R5/R8), canister bar over the player, goal arrow, pad sheets, popups -----
 const moonPct = (S, d) => (100 * S.everCount / SWEEPABLE).toFixed(d);
-function bar(x, y, w, h, k, col, label) { ctx.fillStyle = '#2a2f37'; ctx.fillRect(x, y, w, h); ctx.fillStyle = col; ctx.fillRect(x, y, w * clamp(k, 0, 1), h); ctx.fillStyle = '#fff'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(label, x + 3, y + h - 3); }
+function bar(x, y, w, h, k, col, label) { ctx.fillStyle = '#2a2f37'; ctx.fillRect(x, y, w, h); ctx.fillStyle = col; ctx.fillRect(x, y, w * clamp(k, 0, 1), h); if (label) { ctx.fillStyle = '#fff'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(label, x + 3, y + h - 3); } }
 const LABEL = { capacity: 'Capacity', width: 'Width', speed: 'Speed', payout: 'Payout', panelBoost: 'Panel Boost' };
+const EFFECT = { capacity: 'canister kg', width: 'sweep width', speed: 'walk speed', payout: 'sell price', panelBoost: 'panel $/s' };
+const showFuel = S => S.t > 240 || S.launches > 0; // Fuel joins the HUD at the fuel FTUE (minute 4), batch7c R8
+const zoneC = z => ({ x: z.c + z.w / 2, z: z.r + z.h / 2 });
 function goalTarget(S) {
   if (S.can >= capKg(S) - 1e-6) return { x: DEPOT_C.x, z: DEPOT_C.y, label: 'Sell' };
   const g = nextGate(S); if (g > 0 && S.cash >= gateCost(S, g) - S.gatePaid) return { x: PADS[g].c + 1, z: PADS[g].r + 1, label: 'Gate' };
-  if (canLaunch(S)) return { x: DEPOT.c + 5, z: DEPOT.r + 1, label: 'Launch' };
-  if (S.ftue.wantTerminal) return { x: ZONES.terminal.c + 1.5, z: ZONES.terminal.r + 1.5, label: 'Upgrades' };
+  if (canLaunch(S)) return Object.assign(zoneC(ZONES.launch), { label: 'Launch' });
+  if (S.crewOpen && costOf(S, 'keeper') === 0) return Object.assign(zoneC(ZONES.crew), { label: 'Free Keeper' });
+  if (S.ftue.wantZone) return Object.assign(zoneC(ZONES[S.ftue.wantZone]), { label: ZONES[S.ftue.wantZone].label });
   return null;
+}
+function drawSheet(S, sid) {
+  const sh = SHEETS[sid], top = H - sh.h, cfg = S.cfg;
+  ctx.fillStyle = 'rgba(21,24,29,.95)'; ctx.beginPath(); ctx.roundRect(0, top, W, sh.h + 20, 18); ctx.fill();
+  ctx.fillStyle = ZONES[sid].bg; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center'; ctx.fillText(sh.title, W / 2, top + 26);
+  for (const b of sh.rows) {
+    const x = b.x, y = top + b.y;
+    if (sid === 'terminal') {
+      const c = costOf(S, b.id), en = canBuy(S, b.id);
+      ctx.fillStyle = '#20262d'; ctx.beginPath(); ctx.roundRect(x, y, b.w, b.h, 10); ctx.fill();
+      ctx.textAlign = 'left'; ctx.fillStyle = '#f2f4f7'; ctx.font = 'bold 13px system-ui'; ctx.fillText(LABEL[b.id] + '  Lv ' + S.up[b.id], x + 12, y + 18);
+      ctx.fillStyle = '#8a929c'; ctx.font = '11px system-ui'; ctx.fillText(EFFECT[b.id], x + 12, y + 33);
+      ctx.fillStyle = c == null ? '#333a44' : en ? '#FFD45E' : '#3a414c'; ctx.beginPath(); ctx.roundRect(x + b.w - 110, y + 5, 102, b.h - 10, 8); ctx.fill();
+      ctx.textAlign = 'center'; ctx.fillStyle = en ? '#111' : '#9aa3ad'; ctx.font = 'bold 13px system-ui'; ctx.fillText(c == null ? 'MAX' : '$' + fmt(c), x + b.w - 59, y + 25);
+    } else if (sid === 'refinery') {
+      const on = Math.abs(S.fuelShare - b.v) < 1e-9;
+      ctx.fillStyle = on ? '#c77dff' : '#20262d'; ctx.beginPath(); ctx.roundRect(x, y, b.w, b.h, 10); ctx.fill();
+      ctx.textAlign = 'center'; ctx.fillStyle = on ? '#111' : '#f2f4f7'; ctx.font = 'bold 14px system-ui'; ctx.fillText(Math.round(b.v * 100) + '%', x + b.w / 2, y + 21);
+      ctx.font = '10px system-ui'; ctx.fillText('to Fuel', x + b.w / 2, y + 36);
+    } else {
+      const ok = canLaunch(S);
+      ctx.fillStyle = ok ? '#FFD45E' : '#3a414c'; ctx.beginPath(); ctx.roundRect(x, y, b.w, b.h, 28); ctx.fill();
+      ctx.textAlign = 'center'; ctx.fillStyle = ok ? '#111' : '#9aa3ad'; ctx.font = 'bold 18px system-ui'; ctx.fillText(ok ? 'LAUNCH ▲' : 'NOT READY', x + b.w / 2, y + 35);
+    }
+  }
+  ctx.textAlign = 'center'; ctx.fillStyle = '#888'; ctx.font = '11px system-ui';
+  if (sid === 'refinery') ctx.fillText('Dust sold at the Depot: this share becomes Fuel (tank ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg + ')', W / 2, top + 132);
+  else if (sid === 'launch') ctx.fillText('Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg + ' · Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W / 2, top + 140);
+  else ctx.fillText('walk off the pad to close', W / 2, H - 10);
 }
 function drawOverlay(S) {
   const cfg = S.cfg; ctx.clearRect(0, 0, W, H);
@@ -319,6 +439,9 @@ function drawOverlay(S) {
   for (const f of S.fx) { const s = toScreen(f.x, 1.2 + (1.3 - f.life) * 1.2, f.y); if (s.behind) continue; ctx.globalAlpha = clamp(f.life * 2, 0, 1); ctx.fillStyle = f.col; if (f.type === 'dot') ctx.fillRect(s.x - 2, s.y - 2, 4, 4); else { ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(f.text, s.x, s.y); } }
   ctx.globalAlpha = 1;
   if (k > 0.3) { ctx.globalAlpha = clamp((k - 0.3) / 0.4, 0, 1); ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 34px system-ui'; ctx.fillText('Moon ' + moonPct(S, 2) + '%', W / 2, HUD_H + 60); ctx.font = '13px system-ui'; ctx.fillStyle = '#ccc'; ctx.fillText(S.t < 4 ? 'one planet. one ' + cfg.tools[S.tool].id.toLowerCase() + '.' : S.litCount + ' panels lit', W / 2, HUD_H + 82); ctx.globalAlpha = 1; }
+  // canister bar over the player's head (status in-world, batch7c §6 Canister)
+  const full = S.can >= capKg(S) - 1e-6;
+  if (k < 0.1) { const s = toScreen(S.player.x, 1.9, S.player.y); if (!s.behind) { bar(s.x - 26, s.y - 18, 52, 7, S.can / capKg(S), full && Math.sin(S.t * 12) > 0 ? '#ff5a3a' : '#FF9F43'); if (full) { ctx.fillStyle = '#ff7a5a'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText('FULL', s.x, s.y - 22); } } }
   // goal arrow
   const tg = k < 0.1 && goalTarget(S);
   if (tg) {
@@ -328,41 +451,23 @@ function drawOverlay(S) {
       ctx.save(); ctx.translate(ex, ey); ctx.rotate(a); ctx.fillStyle = '#FFD45E'; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.closePath(); ctx.fill(); ctx.restore();
       ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText(tg.label, ex - Math.cos(a) * 26, ey - Math.sin(a) * 26 + 4); }
   }
-  // HUD
+  // HUD: left cash + $/s, centre Moon % bar + Grid %, right Shop (+ Star Map after first Launch)
   ctx.fillStyle = 'rgba(21,24,29,.92)'; ctx.fillRect(0, 0, W, HUD_H);
-  ctx.textAlign = 'left'; ctx.font = 'bold 18px system-ui'; ctx.fillStyle = '#FFD45E'; ctx.fillText('$' + fmt(S.cash), 10, 22);
-  ctx.font = '11px system-ui'; ctx.fillStyle = '#3EE6FF'; ctx.fillText('+$' + fmt(S.rate) + '/s', 10, 39);
-  ctx.fillStyle = '#999'; ctx.fillText(mmss(S.t) + (speed > 1 ? ' x' + speed : '') + (S.stardust ? '  ★' + S.stardust : '') + '  ' + fps + 'fps', 10, 55);
-  ctx.textAlign = 'center'; ctx.font = 'bold 17px system-ui'; ctx.fillStyle = '#fff'; ctx.fillText('Moon ' + moonPct(S, 2) + '%', 158, 22);
+  ctx.textAlign = 'left'; ctx.font = 'bold 19px system-ui'; ctx.fillStyle = '#FFD45E'; ctx.fillText('$' + fmt(S.cash), 10, 24);
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#3EE6FF'; ctx.fillText('+$' + fmt(S.rate) + '/s', 10, 40);
+  ctx.fillStyle = '#666'; ctx.font = '9px system-ui'; ctx.fillText(mmss(S.t) + (speed > 1 ? ' x' + speed : '') + ' · ' + fps + 'fps', 10, 54);
+  ctx.textAlign = 'center'; ctx.font = 'bold 15px system-ui'; ctx.fillStyle = '#fff'; ctx.fillText('Moon ' + moonPct(S, 1) + '%', 195, 19);
+  bar(130, 25, 130, 8, S.everCount / SWEEPABLE, '#3EE6FF');
   const up = S.everCount ? S.litCount / S.everCount : 1;
-  ctx.font = 'bold 12px system-ui'; ctx.fillStyle = up >= 0.9 ? '#3EE6FF' : up >= 0.7 ? '#FFD45E' : '#ff7a5a'; ctx.fillText('Grid ' + Math.round(100 * up) + '%', 158, 39);
-  ctx.font = '11px system-ui'; ctx.fillStyle = '#999'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', 158, 55);
-  const full = S.can >= capKg(S) - 1e-6;
-  bar(232, 8, 112, 15, S.can / capKg(S), full && Math.sin(S.t * 12) > 0 ? '#ff5a3a' : '#FF9F43', (full ? 'FULL ' : 'Can ') + S.can.toFixed(1) + '/' + fmt(capKg(S)) + ' kg');
-  bar(232, 27, 112, 15, S.fuel / cfg.refinery.tankKg, '#c77dff', 'Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg);
-  ctx.fillStyle = '#999'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(cfg.tools[S.tool].id + ' · w' + toolWidth(S) + ' · ' + cfg.tools[S.tool].passes + ' pass', 232, 56);
+  ctx.textAlign = 'center'; ctx.font = 'bold 11px system-ui'; ctx.fillStyle = up >= 0.9 ? '#3EE6FF' : up >= 0.7 ? '#FFD45E' : '#ff7a5a'; ctx.fillText('Grid ' + Math.round(100 * up) + '%', 195, 48);
+  for (const [id, b] of Object.entries(HUD_BTN)) { if (id === 'map' && !(S.stardust > 0)) continue; ctx.fillStyle = id === 'map' ? '#c77dff' : '#3a414c'; ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill(); ctx.fillStyle = id === 'map' ? '#111' : '#eee'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center'; ctx.fillText(b.label + (id === 'map' ? ' ★' + S.stardust : ''), b.x + b.w / 2, b.y + b.h / 2 + 4); }
+  if (showFuel(S)) { bar(W - 96, HUD_H + 6, 88, 13, S.fuel / cfg.refinery.tankKg, '#c77dff', 'Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg); ctx.fillStyle = '#ccc'; ctx.font = '10px system-ui'; ctx.textAlign = 'right'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W - 8, HUD_H + 31); }
   const st = S.storm;
-  if (st.phase === 'warn') { ctx.fillStyle = 'rgba(255,122,90,.9)'; ctx.beginPath(); ctx.roundRect(85, HUD_H + 8, 220, 26, 13); ctx.fill(); ctx.fillStyle = '#111'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DUST STORM in ' + Math.ceil(st.blowAt - S.t), W / 2, HUD_H + 26); }
-  // terminal sheet (in-world upgrade terminal)
-  if (sheetOpen(S)) {
-    ctx.fillStyle = 'rgba(21,24,29,.95)'; ctx.beginPath(); ctx.roundRect(0, SHEET_Y, W, H - SHEET_Y + 20, 18); ctx.fill();
-    ctx.fillStyle = '#3EE6FF'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center'; ctx.fillText('UPGRADE TERMINAL', W / 2, SHEET_Y + 25);
-    for (const b of BTN) {
-      let label, sub, en, c;
-      if (UPS.includes(b.id)) { c = costOf(S, b.id); label = LABEL[b.id] + ' ' + S.up[b.id]; sub = c == null ? 'MAX' : '$' + fmt(c); en = canBuy(S, b.id); }
-      else if (b.id === 'tool') { const nt = cfg.tools[S.tool + 1]; label = nt ? nt.id : 'Max tool'; sub = nt ? '$' + fmt(nt.cost) : '–'; en = canBuy(S, 'tool'); }
-      else if (b.id === 'keeper') { c = costOf(S, 'keeper'); label = 'Keeper ' + S.keepers.length + '/' + cfg.keeper.max; sub = !S.crewOpen ? 'after 1st storm' : c == null ? 'MAX' : c === 0 ? 'FREE' : '$' + fmt(c); en = canBuy(S, 'keeper'); }
-      else { label = 'Fuel ' + Math.round(S.fuelShare * 100) + '%'; sub = 'sell ' + Math.round((1 - S.fuelShare) * 100) + '% · tap'; en = true; }
-      ctx.fillStyle = en ? '#24323a' : '#1f2329'; ctx.strokeStyle = en ? (b.id === 'keeper' ? '#3EE6FF' : b.id === 'fuel' ? '#c77dff' : '#FFD45E') : '#333a44'; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill(); ctx.stroke();
-      ctx.textAlign = 'center'; ctx.font = 'bold 11px system-ui'; ctx.fillStyle = en ? '#f2f4f7' : '#7b828c'; ctx.fillText(label, b.x + b.w / 2, b.y + 22);
-      ctx.font = '11px system-ui'; ctx.fillStyle = en ? '#FFD45E' : '#6b727c'; ctx.fillText(sub, b.x + b.w / 2, b.y + 40);
-    }
-    ctx.fillStyle = '#888'; ctx.font = '11px system-ui'; ctx.fillText('walk off the pad to close', W / 2, H - 14);
-  }
-  if (canLaunch(S) && !S.popup) { const pz = 1 + 0.04 * Math.sin(S.t * 6), b = LAUNCH_BTN; ctx.fillStyle = '#FFD45E'; ctx.beginPath(); ctx.roundRect(b.x - (pz - 1) * 90, b.y, b.w * pz, b.h, 25); ctx.fill(); ctx.fillStyle = '#111'; ctx.font = 'bold 18px system-ui'; ctx.textAlign = 'center'; ctx.fillText('LAUNCH ▲', W / 2, b.y + 32); }
-  const f = !S.popup && !sheetOpen(S) && activeFtue(S);
-  if (f) { ctx.font = 'bold 13px system-ui'; const tw = ctx.measureText(f.text).width + 20, by = st.phase === 'warn' ? HUD_H + 42 : HUD_H + 10; ctx.fillStyle = 'rgba(255,255,255,.93)'; ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2, by, tw, 24, 12); ctx.fill(); ctx.fillStyle = '#111'; ctx.textAlign = 'center'; ctx.fillText(f.text, W / 2, by + 16); }
+  if (st.phase === 'warn') { ctx.fillStyle = 'rgba(255,122,90,.9)'; ctx.beginPath(); ctx.roundRect(95, HUD_H + 8, 190, 26, 13); ctx.fill(); ctx.fillStyle = '#111'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DUST STORM in ' + Math.ceil(st.blowAt - S.t), W / 2 - 0, HUD_H + 26); }
+  const sid = activeSheet(S); if (sid) drawSheet(S, sid);
+  const f = !S.popup && !sid && activeFtue(S);
+  if (f) { ctx.font = 'bold 13px system-ui'; const tw = Math.min(W - 16, ctx.measureText(f.text).width + 20), by = st.phase === 'warn' ? HUD_H + 42 : HUD_H + 10; ctx.fillStyle = 'rgba(255,255,255,.93)'; ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2, by, tw, 24, 12); ctx.fill(); ctx.fillStyle = '#111'; ctx.textAlign = 'center'; ctx.fillText(f.text, W / 2, by + 16, tw - 12); }
+  if (toast && performance.now() < toast.until) { ctx.font = 'bold 12px system-ui'; ctx.fillStyle = 'rgba(0,0,0,.8)'; ctx.beginPath(); ctx.roundRect(W / 2 - 100, H / 2 - 16, 200, 30, 15); ctx.fill(); ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.fillText(toast.text, W / 2, H / 2 + 4); }
   if (joy) { ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 40, 0, Math.PI * 2); ctx.stroke(); const dx = joy.x - joy.ox, dy = joy.y - joy.oy, d = Math.hypot(dx, dy), kk = d > 40 ? 40 / d : 1; ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.beginPath(); ctx.arc(joy.ox + dx * kk, joy.oy + dy * kk, 16, 0, Math.PI * 2); ctx.fill(); }
   if (S.popup) {
     ctx.fillStyle = '#000b'; ctx.fillRect(0, 0, W, H); ctx.fillStyle = '#232830'; ctx.beginPath(); ctx.roundRect(40, 320, 310, 210, 14); ctx.fill(); ctx.textAlign = 'center';
@@ -385,24 +490,25 @@ const FTUE = [
   { id: 'move', text: 'Drag anywhere to sweep', when: S => S.t > 3, done: S => S.everCount >= 4 },
   { id: 'lit', text: 'Clean tiles light up and pay $/s', when: S => S.everCount >= 4, done: S => S.ftue.shownAt.lit != null && S.t - S.ftue.shownAt.lit > 5 },
   { id: 'depot', text: 'Canister full: walk into the Depot to sell', when: S => S.can >= capKg(S) - 1e-6, done: S => S.tele.firstSell != null },
-  { id: 'cap', text: 'Stand on UPGRADES to buy', when: S => canBuy(S, 'capacity') || canBuy(S, 'tool'), done: S => S.tele.firstUpgrade != null, terminal: true },
+  { id: 'cap', text: 'Stand on UPGRADES to buy', when: S => canBuy(S, 'capacity'), done: S => S.tele.firstUpgrade != null, zone: 'terminal' },
+  { id: 'tool', text: 'Stand on the TOOL RACK to pay for a new tool', when: S => S.tool === 0 && canBuy(S, 'tool'), done: S => S.tool > 0, zone: 'tool' },
   { id: 'gate', text: 'Stand on the gold pad to open a sector', when: S => nextGate(S) === 1 && S.cash >= gateCost(S, 1) - S.gatePaid, done: S => S.unlocked[1] },
   { id: 'storm', text: 'Storm dusted your panels: sweep them again', when: S => S.stormed > 0, done: S => S.keepers.length > 0 || (S.ftue.shownAt.storm != null && S.t - S.ftue.shownAt.storm > 6) },
-  { id: 'keeper', text: 'Free Keeper Drone at UPGRADES', when: S => canBuy(S, 'keeper'), done: S => S.keepers.length > 0, terminal: true },
-  { id: 'fuel', text: 'Dust → Fuel. Full tank + 70% Lit = Launch', when: S => S.t > 240, done: S => S.ftue.shownAt.fuel != null && S.t - S.ftue.shownAt.fuel > 8 },
+  { id: 'keeper', text: 'Free Keeper Drone at the CREW BAY', when: S => canBuy(S, 'keeper'), done: S => S.keepers.length > 0, zone: 'crew' },
+  { id: 'fuel', text: 'REFINERY: Dust → Fuel. Full tank + 70% Lit = Launch', when: S => S.t > 240, done: S => inZone(S, ZONES.refinery) || (S.ftue.shownAt.fuel != null && S.t - S.ftue.shownAt.fuel > 12), zone: 'refinery' },
 ];
 function activeFtue(S) {
-  S.ftue.wantTerminal = false;
+  S.ftue.wantZone = null;
   for (const f of FTUE) {
     if (S.ftue.done[f.id]) continue;
     if (f.done(S)) { S.ftue.done[f.id] = true; continue; }
-    if (f.when(S)) { S.ftue.shownAt[f.id] ??= S.t; S.ftue.wantTerminal = !!f.terminal; return f; }
+    if (f.when(S)) { S.ftue.shownAt[f.id] ??= S.t; S.ftue.wantZone = f.zone || null; return f; }
   }
   return null;
 }
 
 // ----- tuning panel (same tools as 2D) -----
-function startGame(keep) { const S = newGame(CONFIG, keep); S.sfxFn = playSfx; S.payFlow = true; return S; }
+function startGame(keep) { const S = newGame(CONFIG, keep); S.sfxFn = playSfx; S.payFlow = true; S.zonePaid = {}; return S; }
 let G = startGame(), speed = 1, fps = 0;
 const panel = document.getElementById('panel');
 function buildPanel() {
@@ -442,6 +548,12 @@ function selfTest3d() {
   S.cash += 100; for (let i = 0; i < 40; i++) step(S, 0.05, null);
   r.payZone = partial && S.unlocked[1] && Math.abs(S.cash - (130 - gateCost(S, 1))) < 1e-6 && S.gatePaid === 0;
   keys.w = true; const v = inputVec(); keys.w = false; const yaw = CAM.yawDeg * Math.PI / 180;
+  // pay zones in this layer: tool tier bought after ui.payZoneSec on the rack; first Keeper free and instant at the Crew Bay
+  const T = newGame(JSON.parse(JSON.stringify(CONFIG)), { headless: true }); T.zonePaid = {}; T.cash = T.cfg.tools[1].cost; T.player.x = ZONES.tool.c + 1; T.player.y = ZONES.tool.r + 1;
+  for (let i = 0; i < 10; i++) stepPayZones(T, 0.05); const toolHalf = T.tool === 0 && T.zonePaid.tool > 0;
+  for (let i = 0; i < 30; i++) stepPayZones(T, 0.05); r.toolPayZone = toolHalf && T.tool === 1 && Math.abs(T.cash) < 1e-6 && T.zonePaid.tool === 0;
+  T.crewOpen = true; T.player.x = ZONES.crew.c + 1; T.player.y = ZONES.crew.r + 1; stepPayZones(T, 0.05); r.freeKeeper = T.keepers.length === 1;
+  r.padsOutsideDepot = Object.values(ZONES).every(z => z.c >= DEPOT.c + DEPOT.w || z.c + z.w <= DEPOT.c || z.r >= DEPOT.r + DEPOT.h || z.r + z.h <= DEPOT.r);
   r.inputMatchesCamera = Math.abs(v.x + Math.sin(yaw)) < 1e-9 && Math.abs(v.y + Math.cos(yaw)) < 1e-9; // "up" on screen = away from camera
   r.pass = Object.entries(r).every(([k, v]) => k === 'pass' || v === true);
   console.assert(r.pass, 'selfTest3d failed', r);
@@ -449,12 +561,13 @@ function selfTest3d() {
 }
 const selfTestResult = selfTest3d();
 console.log('[selfTest]', selfTestResult);
-Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.assign(SP, { updateWorld, drawOverlay, renderer, scene, camera, inputVec, CAM });
+Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.assign(SP, { updateWorld, drawOverlay, stepPayZones, moneyFlows, ZONES, selfTest3d, renderer, scene, camera, inputVec, CAM });
 
 let last = performance.now(), teleTimer = 0, logMin = 0, fpsN = 0, fpsT = 0;
 function frame(now) {
   const real = Math.min(0.1, (now - last) / 1000); last = now;
-  if (!G.popup) { let rem = real * speed; const inp = inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); rem -= d; } }
+  if (!G.popup) { let rem = real * speed; const inp = inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); stepPayZones(G, d); rem -= d; } }
+  moneyFlows(G, real);
   updateWorld(G, real); renderer.render(scene, camera); drawOverlay(G);
   fpsN++; fpsT += real; if (fpsT >= 1) { fps = Math.round(fpsN / fpsT); fpsN = 0; fpsT = 0; }
   teleTimer += real; if (teleTimer > 0.5 && panel.style.display === 'block') { teleTimer = 0; const el = document.getElementById('tele'); if (el) el.textContent = teleText(G); }

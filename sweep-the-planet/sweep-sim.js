@@ -9,10 +9,10 @@
 // ===== CONFIG: every tunable lives here (concept §13.2; values changed by greybox tuning are marked "tuned") =====
 const CONFIG = {
   grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 800, 2000, 6000] }, // tuned (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
-  player: { speed: 4.8 /* tiles per second; 4.0 before the fine dust mask (full-tile coverage needs more walking) */ },
-  // pricePerKg: concept 1.0, 4.0 in the tile greybox, 4.5 with the fine dust mask. sub = mask cells per tile side; a tile is Lit at
+  player: { speed: 5.4 /* tiles per second; 4.0 tile greybox, 4.8 fine dust mask, 5.4 with buildings and rocks to walk around */ },
+  // pricePerKg: concept 1.0, 4.0 in the tile greybox, 4.5 with the fine dust mask, 5.0 with collision. sub = mask cells per tile side; a tile is Lit at
   // >= litCleanFrac clean cells; brushDepth = brush size along the facing; brushPad = brush a bit wider than `width` so strokes overlap.
-  dust: { kgPerTile: 0.25, pricePerKg: 4.5, sub: 6, litCleanFrac: 0.95, brushDepth: 0.5, brushPad: 0.1 },
+  dust: { kgPerTile: 0.25, pricePerKg: 5.0, sub: 6, litCleanFrac: 0.95, brushDepth: 0.5, brushPad: 0.1 },
   lit: { powerPerTile: 0.0015 /* $ per second; tuned (concept 0.01 = Lit beat sales in minute 1, Launch at 9 min) */, gridLinkMult: 2, linkRecalcSec: 1 },
   tools: [
     { id: 'Toothbrush', reach: 0.8, width: 1, passes: 3, capKg: 10, speedMult: 1.0, cost: 0 },
@@ -59,19 +59,53 @@ function deepMerge(a, b) { for (const k in b) { if (b[k] && typeof b[k] === 'obj
 
 // ===== map geometry (48 x 72 tiles, 6 sectors of 24 x 24: 0/1 bottom, 2/3 middle, 4/5 top) =====
 const C = 48, R = 72, N = C * R;
-const DEPOT = { c: 9, r: 62, w: 6, h: 4 }; // left 4 = Depot, right 2 = Refinery + Launch Pad
+// World layout (tile coords). Every rect below is a clean foundation: no dust, not sweepable, not in Moon %, skipped by storms
+// (KIND != 0: 1 = Depot plate, the Grid Link source; 2 = pads, building plates, gate pads; 3 = rock). SOLIDS and ROCKS block the
+// player, the Keepers and the tool head (circle vs box). The 3D layer places every mesh from these numbers.
+const DEPOT = { c: 9, r: 62, w: 4, h: 4 }; // Depot plate; the building fills it except a 0.45 rim, walking up to it sells
 const DEPOT_C = { x: DEPOT.c + 2, y: DEPOT.r + 2 };
-const PADS = [null, { c: 21, r: 57, w: 2, h: 2 }, { c: 10, r: 48, w: 2, h: 2 }, { c: 21, r: 34, w: 2, h: 2 }, { c: 10, r: 24, w: 2, h: 2 }, { c: 21, r: 10, w: 2, h: 2 }];
+const SELL = { c: DEPOT.c - 0.45, r: DEPOT.r - 0.45, w: DEPOT.w + 0.9, h: DEPOT.h + 0.9 }; // touching the building's wall sells (walk steps stop up to 0.3 short of it)
+const PADZ = { // stand-on pads (3D: panel or pay zone)
+  terminal: { c: 3, r: 62, w: 3, h: 3 }, tool: { c: 3, r: 67, w: 3, h: 3 }, crew: { c: 3, r: 57, w: 3, h: 3 },
+  refinery: { c: 14, r: 64, w: 2, h: 2 }, launch: { c: 14, r: 61, w: 2, h: 2 },
+};
+const BLDG = { // building plates; the building is solid inside its plate (inset 0.15)
+  terminal: { c: 3, r: 61, w: 3, h: 1 }, rack: { c: 3, r: 70, w: 3, h: 1 }, hangar: { c: 3, r: 55, w: 3, h: 2 },
+  refinery: { c: 16, r: 64, w: 2, h: 2 }, launch: { c: 16, r: 61, w: 2, h: 2 },
+};
+// gate pads straddle the border of the sector they open (half on each side; the player stands on the open half)
+const PADS = [null, { c: 23, r: 57, w: 2, h: 2 }, { c: 10, r: 47, w: 2, h: 2 }, { c: 23, r: 34, w: 2, h: 2 }, { c: 10, r: 23, w: 2, h: 2 }, { c: 23, r: 10, w: 2, h: 2 }];
 const sectorOf = (c, r) => (2 - Math.floor(r / 24)) * 2 + (c >= 24 ? 1 : 0);
-const SEC = new Uint8Array(N), KIND = new Uint8Array(N), DOTS = new Float32Array(N * 12);
+const SEC = new Uint8Array(N), KIND = new Uint8Array(N);
 function hsh(i) { let h = Math.imul(i ^ 0x9e3779b9, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return h >>> 0; }
-for (let i = 0; i < N; i++) {
-  const c = i % C, r = (i / C) | 0; SEC[i] = sectorOf(c, r);
-  KIND[i] = c >= DEPOT.c && c < DEPOT.c + DEPOT.w && r >= DEPOT.r && r < DEPOT.r + DEPOT.h ? 1 : 0;
-  const h1 = hsh(i), h2 = hsh(i + 7777);
-  for (let k = 0; k < 6; k++) { DOTS[i * 12 + k * 2] = 0.1 + ((h1 >>> (k * 5)) & 31) / 32 * 0.8; DOTS[i * 12 + k * 2 + 1] = 0.1 + ((h2 >>> (k * 5)) & 31) / 32 * 0.8; }
+const ROCKS = []; // 18 rocks, deterministic; kept off sector borders (gate pads) and the base area
+for (let t = 0; ROCKS.length < 18 && t < 4000; t++) {
+  const h = hsh(t + 4242), c = 1 + h % (C - 2), r = 1 + (h >>> 8) % (R - 2);
+  if (c % 24 < 2 || c % 24 > 21 || r % 24 < 2 || r % 24 > 21 || (c < 21 && r > 50) || ROCKS.some(k => Math.abs(k.c - c) + Math.abs(k.r - r) < 7)) continue;
+  ROCKS.push({ c, r, x: c + 0.5, y: r + 0.5, rad: 0.36 + ((h >>> 20) & 7) * 0.012 });
 }
-const SWEEPABLE = N - DEPOT.w * DEPOT.h;
+const inset = (b, m) => ({ x0: b.c + m, y0: b.r + m, x1: b.c + b.w - m, y1: b.r + b.h - m });
+const SOLIDS = [inset(DEPOT, 0.45), ...Object.values(BLDG).map(b => inset(b, 0.15))];
+for (let i = 0; i < N; i++) { const c = i % C, r = (i / C) | 0; SEC[i] = sectorOf(c, r); }
+const markRect = (b, k) => { for (let r = b.r; r < b.r + b.h; r++) for (let c = b.c; c < b.c + b.w; c++) KIND[r * C + c] = k; };
+[...Object.values(PADZ), ...Object.values(BLDG), ...PADS.slice(1)].forEach(b => markRect(b, 2)); markRect(DEPOT, 1);
+for (const k of ROCKS) KIND[k.r * C + k.c] = 3;
+const SWEEPABLE = KIND.reduce((n, k) => n + (k ? 0 : 1), 0);
+// circle (radius rad) vs SOLIDS boxes and ROCKS circles
+function blocked(x, y, rad) {
+  for (const s of SOLIDS) if (x > s.x0 - rad && x < s.x1 + rad && y > s.y0 - rad && y < s.y1 + rad) return true;
+  for (const k of ROCKS) if ((x - k.x) * (x - k.x) + (y - k.y) * (y - k.y) < (k.rad + rad) * (k.rad + rad)) return true;
+  return false;
+}
+function pushOut(o, rad) { // move a circle out of any solid (Keepers); returns true if it was inside
+  let hit = false;
+  for (const s of SOLIDS) {
+    const x0 = s.x0 - rad, x1 = s.x1 + rad, y0 = s.y0 - rad, y1 = s.y1 + rad;
+    if (o.x > x0 && o.x < x1 && o.y > y0 && o.y < y1) { hit = true; const m = [o.x - x0, x1 - o.x, o.y - y0, y1 - o.y], k = m.indexOf(Math.min(...m)); if (k === 0) o.x = x0; else if (k === 1) o.x = x1; else if (k === 2) o.y = y0; else o.y = y1; }
+  }
+  for (const k of ROCKS) { const dx = o.x - k.x, dy = o.y - k.y, d = Math.hypot(dx, dy), m = k.rad + rad; if (d < m && d > 1e-6) { hit = true; o.x = k.x + dx / d * m; o.y = k.y + dy / d * m; } }
+  return hit;
+}
 const inRectT = (x, y, r) => x >= r.c && x < r.c + r.w && y >= r.r && y < r.r + r.h;
 
 // ===== economy =====
@@ -99,7 +133,7 @@ function buy(S, id) {
   if (S.tele.firstUpgrade == null) S.tele.firstUpgrade = S.t;
   if (UPS.includes(id)) S.up[id]++;
   else if (id === 'tool') { S.tool++; S.tele.tierAt[S.tool] = S.t; fxConfetti(S); sfx(S, 'tool'); }
-  else if (id === 'keeper') { S.keepers.push({ x: DEPOT_C.x, y: DEPOT_C.y - 1, target: -1, work: 0, sector: -1, id: S.keepers.length }); S.tele.keeperAt[S.keepers.length] = S.t; sfx(S, 'keeper'); }
+  else if (id === 'keeper') { S.keepers.push({ x: DEPOT_C.x, y: DEPOT.r - 0.6, target: -1, work: 0, sector: -1, id: S.keepers.length }); S.tele.keeperAt[S.keepers.length] = S.t; sfx(S, 'keeper'); }
   return true;
 }
 function unlockGate(S, k) {
@@ -208,7 +242,11 @@ function passTile(S, i, amt, collect) { // one pass over the whole tile (Keepers
 // `width` across the facing and dust.brushDepth deep (round tools: a disc of diameter width + 2 x suctionRadius), stamped on the fine
 // mask along the head's path every step (sub-stamps every 0.2 tile so fast moves leave no gaps). A cell gets a pass when it enters
 // the brush; cells already under the brush in the previous stamp do not (so standing or pushing slowly is not free scrubbing).
-function headPos(S) { const p = S.player, rc = toolDef(S).reach || 0.9; return { x: p.x + Math.cos(p.face) * rc, y: p.y + Math.sin(p.face) * rc }; }
+function headPos(S) { // the head stops in front of a building or rock (d = actual handle reach, for the 3D tool)
+  const p = S.player, rc = toolDef(S).reach || 0.9, fx = Math.cos(p.face), fy = Math.sin(p.face); let d = rc;
+  for (let k = 1; k * 0.1 <= rc + 1e-9; k++) if (blocked(p.x + fx * k * 0.1, p.y + fy * k * 0.1, 0)) { d = (k - 1) * 0.1; break; }
+  return { x: p.x + fx * d, y: p.y + fy * d, d };
+}
 function brushStamp(S, ax, ay, bx, by) {
   const td = toolDef(S), w = toolWidth(S), SUB = S.SUB, MW = S.MW, f = S.player.face, fx = Math.cos(f), fy = Math.sin(f);
   if (capKg(S) - S.can <= 1e-9) { S.blocked = S.t; return; }
@@ -236,7 +274,7 @@ function brushStamp(S, ax, ay, bx, by) {
 }
 function walkable(S, x, y) {
   if (x < 0.25 || y < 0.25 || x > C - 0.25 || y > R - 0.25) return false;
-  return S.unlocked[SEC[Math.floor(y) * C + Math.floor(x)]];
+  return S.unlocked[SEC[Math.floor(y) * C + Math.floor(x)]] && !blocked(x, y, 0.3);
 }
 function movePlayer(S, ix, iy, dt) {
   const p = S.player, len = Math.hypot(ix, iy); p.moving = len > 0.01;
@@ -252,7 +290,7 @@ function movePlayer(S, ix, iy, dt) {
 }
 function recalcLinks(S) {
   const L = S.linked, q = S.q; L.fill(0); let h = 0, t = 0;
-  for (let i = 0; i < N; i++) if (KIND[i]) { L[i] = 1; S.dist[i] = 0; S.par[i] = -1; q[t++] = i; }
+  for (let i = 0; i < N; i++) if (KIND[i] === 1) { L[i] = 1; S.dist[i] = 0; S.par[i] = -1; q[t++] = i; }
   while (h < t) {
     const i = q[h++], c = i % C;
     for (let k = 0; k < 4; k++) {
@@ -313,7 +351,10 @@ function stepKeepers(S, dt) {
     if (k.target < 0) { k.work = 0; k.retry = (k.retry || 0) - dt; if (k.retry <= 0) { k.target = pickKeeperTarget(S, k); k.retry = k.target < 0 ? 0.5 : 0; } }
     const tx = k.target >= 0 ? k.target % C + 0.5 : DEPOT_C.x + Math.cos(S.t * 0.7 + k.id * 1.05) * 3, ty = k.target >= 0 ? ((k.target / C) | 0) + 0.5 : DEPOT.r - 1.5 + Math.sin(S.t * 0.7 + k.id * 1.05) * 1.2;
     const dx = tx - k.x, dy = ty - k.y, d = Math.hypot(dx, dy), s = kc.speed * dt;
-    if (d > s) { k.x += dx / d * s; k.y += dy / d * s; k.working = false; }
+    if (d > s) {
+      const ox = k.x, oy = k.y; k.x += dx / d * s; k.y += dy / d * s; k.working = false;
+      if (pushOut(k, 0.35) && Math.hypot(k.x - ox, k.y - oy) < s * 0.3) { const sg = k.id % 2 ? 1 : -1; k.x = ox - dy / d * s * sg; k.y = oy + dx / d * s * sg; pushOut(k, 0.35); } // head-on into a wall: slide sideways
+    }
     else { k.x = tx; k.y = ty; if (k.target >= 0) { k.working = true; k.work += dt; if (k.work >= kc.secPerPass) { k.work = 0; passTile(S, k.target, kc.passPower, false); } } }
   }
 }
@@ -321,7 +362,7 @@ function step(S, dt, input) {
   S.t += dt;
   if (input) movePlayer(S, input.x, input.y, dt); else S.player.moving = false;
   const p = S.player;
-  if (inRectT(p.x, p.y, DEPOT)) sell(S);
+  if (inRectT(p.x, p.y, SELL)) sell(S);
   const g = nextGate(S);
   if (g > 0 && inRectT(p.x, p.y, PADS[g])) {
     if (!S.payFlow) unlockGate(S, g);
@@ -346,10 +387,10 @@ function step(S, dt, input) {
 
 // ===== bot (headless) =====
 // reclean: bot also targets storm-dusted tiles. keepers: how many Keepers it will hire. idleAfter: minutes after which the bot stops playing (passive test).
-function nearestDirty(S, reclean) {
+function nearestDirty(S, reclean, ban) {
   const p = S.player, hp = headPos(S), here = Math.floor(hp.y) * C + Math.floor(hp.x); let bi = -1, bd = 1e9;
   for (let i = 0; i < N; i++) {
-    if (KIND[i] || S.dirt[i] <= 0 || !S.unlocked[SEC[i]] || S.foot[i] === S.footId || i === here || (!reclean && S.ever[i])) continue;
+    if (KIND[i] || S.dirt[i] <= 0 || !S.unlocked[SEC[i]] || S.foot[i] === S.footId || i === here || (!reclean && S.ever[i]) || (ban && ban[i] > S.t)) continue;
     const c = i % C, r = (i / C) | 0, near = Math.abs(c + 0.5 - p.x) + Math.abs(r + 0.5 - p.y);
     if (reclean === 'near' && S.ever[i] && near > 6) continue; // human model: re-sweeps storm tiles only when they are close
     const d = near + 0.15 * (Math.abs(c - DEPOT_C.x) + Math.abs(r - DEPOT_C.y));
@@ -358,7 +399,21 @@ function nearestDirty(S, reclean) {
   return bi;
 }
 function unlockedClean(S) { let n = 0, e = 0; for (let i = 0; i < N; i++) if (!KIND[i] && S.unlocked[SEC[i]]) { n++; if (S.ever[i]) e++; } return e / Math.max(1, n); }
-function botMove(S, B) {
+// bot only: slide around buildings and rocks (direct way first, then turns of 45/90/135 degrees to the current side);
+// a bot that has not moved for 2 s flips its side, and after two stalls gives up on the target tile for 20 s
+function steer(S, B, mv) {
+  const p = S.player;
+  if ((B.stallT = (B.stallT || 0) + 0.05) >= 2) {
+    const moved = Math.hypot(p.x - (B.sx ?? p.x), p.y - (B.sy ?? p.y)); B.stallT = 0; B.sx = p.x; B.sy = p.y;
+    if (mv && moved < 0.3) { B.side = -(B.side || 1); if (++B.stalls >= 2 && B.tile >= 0) { (B.ban ??= {})[B.tile] = S.t + 20; B.tile = -1; B.stalls = 0; } } else B.stalls = 0;
+  }
+  if (!mv) return mv;
+  const a = Math.atan2(mv.y, mv.x), m = Math.hypot(mv.x, mv.y), side = B.side || 1;
+  for (const da of [0, 0.785, 1.571, 2.356]) { const b = a + da * side; if (walkable(S, p.x + Math.cos(b) * 0.35, p.y + Math.sin(b) * 0.35)) return { x: Math.cos(b) * m, y: Math.sin(b) * m }; }
+  return mv;
+}
+function botMove(S, B) { B.stalls ??= 0; return steer(S, B, botMove0(S, B)); }
+function botMove0(S, B) {
   const p = S.player;
   if (S.can >= capKg(S) - 1e-6 || S.t - S.blocked < 0.3) { B.tile = -1; return toward(p, DEPOT_C.x, DEPOT_C.y); }
   const g = nextGate(S);
@@ -366,7 +421,7 @@ function botMove(S, B) {
   // human-like strokes: walk onto the target tile's row beside it, then sweep back and forth along the row so the tool head
   // crosses the whole tile each leg (head = body + reach, so a leg runs from reach before the tile to reach past it)
   if (B.tile < 0 || S.dirt[B.tile] <= 0 || B.legs > 12) {
-    B.tile = nearestDirty(S, B.reclean); if (B.tile < 0 && B.reclean === 'near') B.tile = nearestDirty(S, true);
+    B.tile = nearestDirty(S, B.reclean, B.ban); if (B.tile < 0 && B.reclean === 'near') B.tile = nearestDirty(S, true, B.ban);
     B.noDirty = B.tile < 0; B.dir = 0; B.legs = 0; B.appT = 0;
     if (B.tile >= 0) { // lawnmower span: up to 4 tiles of the row, toward the dirtier side, inside the sector
       const tc = B.tile % C, row = B.tile - tc, s0 = Math.floor(tc / 24) * 24, sum = k => (k >= s0 && k < s0 + 24 ? S.dirt[row + k] : 0);
@@ -465,6 +520,17 @@ function selfTest() {
   }
   Object.assign(out, ok);
   out.stormHappened = S.tele.storms >= 2;
+  // layout: every footprint cell (plates, pads, gate pads, rocks) is clean at start and after the storms above; rects never overlap
+  const fpClean = X => { for (let i = 0; i < N; i++) if (KIND[i]) { if (X.dirt[i] !== 0) return false; const c = i % C, r = (i / C) | 0; for (let y = 0; y < X.SUB; y++) for (let x = 0; x < X.SUB; x++) if (X.sub[(r * X.SUB + y) * X.MW + c * X.SUB + x]) return false; } return true; };
+  out.footprintClean = fpClean(newGame(clone(CONFIG), { headless: true })) && fpClean(S);
+  const rects = [DEPOT, ...Object.values(PADZ), ...Object.values(BLDG), ...PADS.slice(1)];
+  out.layoutNoOverlap = rects.every((a, i) => rects.every((b, j) => j <= i || a.c >= b.c + b.w || b.c >= a.c + a.w || a.r >= b.r + b.h || b.r >= a.r + a.h))
+    && ROCKS.every(k => rects.every(b => !inRectT(k.x, k.y, b)));
+  out.gatesOnBorders = PADS.slice(1).every((p, k) => { const v = (p.c + 1) % 24 === 0, a = SEC[p.r * C + p.c], b = SEC[(p.r + (v ? 0 : 1)) * C + p.c + (v ? 1 : 0)]; return (v || (p.r + 1) % 24 === 0) && a !== b && (a === k + 1 || b === k + 1); });
+  // collision: walking into the Depot stops at its wall (still inside the sell rim); the tool head stops at a rock
+  const Q = newGame(clone(CONFIG), { headless: true }); Q.player.x = 7.5; Q.player.y = 64; for (let k = 0; k < 40; k++) step(Q, 0.05, { x: 1, y: 0 });
+  const rk = ROCKS[0]; Q.player.x = rk.x - 1; Q.player.y = rk.y; Q.player.face = 0;
+  out.solidsBlock = Q.player.x > rk.x - 1.01 && headPos(Q).x <= rk.x - rk.rad + 1e-9 && (() => { const Z = newGame(clone(CONFIG), { headless: true }); Z.player.x = 7.5; Z.player.y = 64; for (let k = 0; k < 40; k++) step(Z, 0.05, { x: 1, y: 0 }); return Z.player.x > SELL.c && Z.player.x < DEPOT.c + 0.45 && Z.tele.firstSell !== null; })(); // stopped at the wall and sold there
   // a toothbrush tile needs exactly 3 passes; a storm tile drops to dirtAfter; a Keeper re-lights it
   const T = newGame(clone(CONFIG), { headless: true }); const i0 = 60 * C + 5;
   passTile(T, i0, 1 / 3, true); passTile(T, i0, 1 / 3, true); const before = T.dirt[i0] > 0; passTile(T, i0, 1 / 3, true);
@@ -492,5 +558,5 @@ function selfTest() {
   out.pass = Object.values(out).every(v => v === true);
   return out;
 }
-globalThis.SP = { headPos, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
+globalThis.SP = { SELL, headPos, blocked, PADZ, BLDG, ROCKS, SOLIDS, KIND, SWEEPABLE, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
 

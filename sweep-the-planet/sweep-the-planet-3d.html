@@ -31,7 +31,7 @@
 <div id="cheat"></div>
 <div id="err"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js"></script>
+<script src="sweep-sim.js?v=pass2"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -94,16 +94,31 @@ function softTex(stops) { const cv = document.createElement('canvas'); cv.width 
 const blobGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), blobMat = new THREE.MeshBasicMaterial({ map: softTex([[0, 0.55], [0.55, 0.3], [1, 0]]), color: 0x231a35, transparent: true, depthWrite: false });
 function blob(parent, sx, sz, x = 0, z = 0) { const m = new THREE.Mesh(blobGeo, blobMat); m.scale.set(sx, 1, sz); m.position.set(x, 0.02, z); m.renderOrder = 1; parent.add(m); return m; }
 
-// ===== Lit look: everything a clean, powered tile shows is set here and in litSurface() of the ground shader =====
-// Clean = Power keeps its rule (a fully clean tile earns $/s, storms knock it out); visually a Lit tile is the planet's own
-// polished surface: lighter, glossy, an occasional sparkle; a shimmer runs over it when it turns fully clean; the Grid Link is a
-// thin warm line along clean paths to the Depot. A storm-dusted tile loses the gloss (dull colour) under its dust.
-const LIT_LOOK = { base: 0xdcd6e8, dull: 0x8a84a0, gloss: 0.6, sparkle: 1.0, shimmerSec: 0.9, link: 0xffb45e, linkWidth: 0.035, linkGlow: 0.6 };
-const GROUND = { regolith: 0x6e6884, dust: 0xb7afc6, plate: 0xd4c9bd };
+// ===== Station deck + Lit look =====
+// Fiction: a buried moon station deck lies under the regolith; sweeping it brings the station back online (Clean = Power).
+// Dust IS the moon's regolith: same colour and grain as the terrain around the map (REGOLITH_GLSL is shared by both shaders), so
+// dirty deck, map edge and moon read as one surface. Clean deck = composite panels (seams, bolts, vents) with an inset light strip.
+// LIT_LOOK + deckSurface() below are the single place for the clean / Lit look: when a tile turns Lit its strip powers up with a
+// short warm flicker (flickerSec); a storm-dusted tile goes dark; the Grid Link = glowing conduits in the deck toward the Depot.
+const LIT_LOOK = { deck: 0xa9a3b8, seam: 0x5b556c, strip: 0xffc47a, stripOff: 0x4d475e, link: 0xffa94d, linkWidth: 0.05, linkGlow: 0.85, gloss: 0.3, flickerSec: 0.7, unpowered: 0.8 };
+const GROUND = { regolith: 0x9a91a8, trim: 0x8a8399, marker: 0xff8a3d };
+const SETTLE_SEC = 1.2; // storm dust settles into the mask over this long (no floor wave)
+const sunU = { value: sun.position.clone().normalize() }, regU = { value: v3(GROUND.regolith) }, alarmU = { value: 0 };
+const REGOLITH_GLSL = `
+    float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(h(i), h(i + vec2(1.0, 0.0)), f.x), mix(h(i + vec2(0.0, 1.0)), h(i + vec2(1.0, 1.0)), f.x), f.y); }
+    uniform vec3 uSun; uniform vec3 uReg; uniform float uAlarm;
+    // moon regolith: one colour, two grain scales, soft large blotches, lit by the sun through a fluffy normal
+    vec3 regolith(vec2 g, vec3 N0){
+      float fluff = vn(g * 14.0) * 0.6 + vn(g * 42.0) * 0.4;
+      vec3 N = normalize(N0 + vec3((fluff - 0.5) * 0.45, 0.0, (vn(g * 14.0 + 5.0) - 0.5) * 0.45));
+      return uReg * (0.86 + 0.24 * fluff) * (0.92 + 0.12 * vn(g * 0.35)) * (0.7 + 0.42 * max(dot(N, uSun), 0.0));
+    }
+    vec3 alarm(vec3 c){ return mix(c, vec3(1.0, 0.25, 0.2), uAlarm * 0.16); }`;
 
-// ground: one plane. Per-tile state in a 48 x 72 DataTexture (R dust mean, G flags, B Grid Link dir+dist, A shimmer age); the dust
-// itself is the sim's fine mask (S.sub, 6 x 6 cells per tile) in a second DataTexture: threshold = clean edge, level = thickness,
-// gradient = soft height normal (fluffy look), noise = grain. Only the changed rectangle of the mask is uploaded per frame.
+// ground: one plane. Per-tile state in a 48 x 72 DataTexture (R dust mean, G flags, B Grid Link dir+dist, A power-up / settle age);
+// the dust itself is the sim's fine mask (S.sub, 6 x 6 cells per tile) in a second DataTexture: threshold = clean edge, level =
+// thickness, gradient = soft height normal. Only the changed rectangle of the mask is uploaded per frame.
 const tileData = new Uint8Array(N * 4), tileTex = new THREE.DataTexture(tileData, C, R, THREE.RGBAFormat);
 tileTex.magFilter = tileTex.minFilter = THREE.NearestFilter; tileTex.needsUpdate = true;
 const maskTex = new THREE.DataTexture(new Uint8Array(1), 1, 1, THREE.RedFormat, THREE.UnsignedByteType);
@@ -111,67 +126,88 @@ maskTex.magFilter = maskTex.minFilter = THREE.LinearFilter; maskTex.unpackAlignm
 const groundMat = new THREE.ShaderMaterial({
   uniforms: {
     uTiles: { value: tileTex }, uMask: { value: maskTex }, uMaskSize: { value: new THREE.Vector2(1, 1) }, uTime: { value: 0 }, uGrid: { value: new THREE.Vector2(C, R) },
-    uSun: { value: sun.position.clone().normalize() }, uLitBase: { value: v3(LIT_LOOK.base) }, uDull: { value: v3(LIT_LOOK.dull) }, uLink: { value: v3(LIT_LOOK.link) },
-    uGloss: { value: LIT_LOOK.gloss }, uSparkle: { value: LIT_LOOK.sparkle }, uLinkW: { value: LIT_LOOK.linkWidth }, uLinkGlow: { value: LIT_LOOK.linkGlow },
-    uRegolith: { value: v3(GROUND.regolith) }, uDust: { value: v3(GROUND.dust) }, uPlate: { value: v3(GROUND.plate) },
+    uSun: sunU, uReg: regU, uAlarm: alarmU, uDeck: { value: v3(LIT_LOOK.deck) }, uSeam: { value: v3(LIT_LOOK.seam) }, uStrip: { value: v3(LIT_LOOK.strip) }, uStripOff: { value: v3(LIT_LOOK.stripOff) },
+    uLink: { value: v3(LIT_LOOK.link) }, uLinkW: { value: LIT_LOOK.linkWidth }, uLinkGlow: { value: LIT_LOOK.linkGlow }, uGloss: { value: LIT_LOOK.gloss }, uUnpow: { value: LIT_LOOK.unpowered },
+    uTrim: { value: v3(GROUND.trim) }, uMarker: { value: v3(GROUND.marker) },
   },
   vertexShader: 'varying vec2 vUv; varying vec3 vWorld; void main(){ vUv = uv; vWorld = (modelMatrix * vec4(position, 1.0)).xyz; gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0); }',
   fragmentShader: `
-    precision highp float; uniform sampler2D uTiles; uniform sampler2D uMask; uniform vec2 uMaskSize; uniform float uTime; uniform vec2 uGrid; uniform vec3 uSun;
-    uniform vec3 uLitBase; uniform vec3 uDull; uniform vec3 uLink; uniform float uGloss; uniform float uSparkle; uniform float uLinkW; uniform float uLinkGlow;
-    uniform vec3 uRegolith; uniform vec3 uDust; uniform vec3 uPlate; varying vec2 vUv; varying vec3 vWorld;
-    float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-    float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(h(i), h(i + vec2(1.0, 0.0)), f.x), mix(h(i + vec2(0.0, 1.0)), h(i + vec2(1.0, 1.0)), f.x), f.y); }
+    precision highp float; uniform sampler2D uTiles; uniform sampler2D uMask; uniform vec2 uMaskSize; uniform float uTime; uniform vec2 uGrid;
+    uniform vec3 uDeck; uniform vec3 uSeam; uniform vec3 uStrip; uniform vec3 uStripOff; uniform vec3 uLink; uniform float uLinkW; uniform float uLinkGlow; uniform float uGloss; uniform float uUnpow;
+    uniform vec3 uTrim; uniform vec3 uMarker; varying vec2 vUv; varying vec3 vWorld;
+    ${REGOLITH_GLSL}
     float bit(float f, float b){ return mod(floor(f / b), 2.0); }
-    // ---- Lit look (values from LIT_LOOK in JS) ----
-    vec3 litSurface(vec2 g, vec2 f, float linked, float pop, float dirP, float dist, float shine){
-      vec3 V = normalize(cameraPosition - vWorld);
-      vec3 N = normalize(vec3((vn(g * 3.0) - 0.5) * 0.3, 1.0, (vn(g * 3.0 + 17.0) - 0.5) * 0.3));
-      vec3 col = uLitBase * (0.9 + 0.12 * vn(g * 0.6)) * (0.86 + 0.18 * max(dot(N, uSun), 0.0));
-      col += uGloss * pow(max(dot(reflect(-uSun, N), V), 0.0), 16.0) * vec3(1.0, 0.95, 0.88);
-      vec2 sp = floor(g * 8.0); float tw = h(sp + floor(uTime * 1.3 + h(sp) * 9.0));
-      if (tw > 0.988) col += uSparkle * smoothstep(0.2, 0.0, length(fract(g * 8.0) - 0.5)) * vec3(1.0, 0.97, 0.9);
-      if (shine > 0.5) col += 0.06;
-      if (pop < 0.999) { float x = (f.x + 1.0 - f.y) * 0.5; col += 0.6 * exp(-pow((x - pop * 1.5 + 0.25) * 5.0, 2.0)); }
-      if (linked > 0.5) { // Grid Link: thin warm line from the tile centre toward its parent (the next tile on the way to the Depot)
+    // ---- station deck panel (values from LIT_LOOK); on = strip power 0..1 ----
+    vec3 deckSurface(vec2 g, vec2 f, vec2 cell, float on, float linked, float dirP, float dist, float shine){
+      vec2 e = min(f, 1.0 - f); float m = min(e.x, e.y), seam = 1.0 - smoothstep(0.02, 0.04, m), inset = smoothstep(0.04, 0.085, m);
+      vec3 col = uDeck * (0.93 + 0.07 * h(cell)) * (0.92 + 0.08 * inset);
+      float hi = (1.0 - smoothstep(0.04, 0.08, f.x)) + (1.0 - smoothstep(0.04, 0.08, f.y)), lo = (1.0 - smoothstep(0.04, 0.08, 1.0 - f.x)) + (1.0 - smoothstep(0.04, 0.08, 1.0 - f.y));
+      col *= 1.0 + (0.1 * hi - 0.12 * lo) * (1.0 - seam);                                       // bevelled panel edge
+      col = mix(col, uSeam, seam);
+      float bolt = 1.0 - smoothstep(0.022, 0.036, length(abs(f - 0.5) - vec2(0.38)));
+      col = mix(col, uSeam * 1.25, bolt * 0.85);
+      if (h(cell + 3.7) > 0.72) { float sl = step(0.3, f.y) * step(f.y, 0.62) * step(0.28, f.x) * step(f.x, 0.72) * step(0.5, fract(f.x * 10.0)); col = mix(col, uSeam, sl * 0.8); } // vent
+      bool vt = mod(cell.x + cell.y, 2.0) > 0.5; vec2 sp = vt ? f.yx : f;                         // light strip, alternating direction
+      float strip = step(0.2, sp.x) * step(sp.x, 0.8) * (1.0 - smoothstep(0.025, 0.04, abs(sp.y - 0.8)));
+      col = mix(col, mix(uStripOff, uStrip * 1.35, on), strip);
+      col += uStrip * on * 0.28 * exp(-abs(sp.y - 0.8) * 16.0) * step(0.16, sp.x) * step(sp.x, 0.84);
+      vec3 V = normalize(cameraPosition - vWorld); col += uGloss * pow(max(dot(reflect(-uSun, vec3(0.0, 1.0, 0.0)), V), 0.0), 24.0) * (1.0 - seam);
+      if (shine > 0.5) col += 0.05 * (0.6 + 0.4 * sin(uTime * 3.0 + cell.x));                    // Mop: still wet
+      if (linked > 0.5) { // Grid Link conduit: recessed channel from the tile centre toward the parent, glowing core pulsing toward the Depot
         vec2 q = f - 0.5; float along = dirP < 0.5 ? -q.x : dirP < 1.5 ? q.x : dirP < 2.5 ? -q.y : q.y, across = dirP < 1.5 ? q.y : q.x;
-        float seg = step(-uLinkW, along) * (1.0 - smoothstep(uLinkW * 0.5, uLinkW, abs(across)));
-        float node = 1.0 - smoothstep(uLinkW * 1.3, uLinkW * 2.2, length(q));
-        float pulse = 0.5 + 0.5 * sin((dist - along) * 1.3 + uTime * 5.0); // waves travel toward the Depot
-        col = mix(col, uLink, max(seg, node) * uLinkGlow * (0.5 + 0.5 * pulse));
+        float ch = step(-uLinkW, along) * (1.0 - smoothstep(uLinkW, uLinkW * 1.4, abs(across)));
+        float core = step(-uLinkW, along) * (1.0 - smoothstep(uLinkW * 0.3, uLinkW * 0.6, abs(across)));
+        float node = 1.0 - smoothstep(uLinkW * 1.4, uLinkW * 2.2, length(q));
+        float pulse = 0.5 + 0.5 * sin((dist - along) * 1.3 + uTime * 5.0);
+        col = mix(col, uSeam * 0.8, max(ch, node) * 0.8);
+        col = mix(col, uLink, max(core, node * 0.7) * uLinkGlow * (0.55 + 0.45 * pulse));
       }
       return col;
     }
     void main(){
       vec2 g = vec2(vUv.x * uGrid.x, (1.0 - vUv.y) * uGrid.y), cell = floor(g), f = fract(g), mu = g / uGrid;
       vec4 t = texture2D(uTiles, (cell + 0.5) / uGrid);
-      float dirt = t.r, fl = floor(t.g * 255.0 + 0.5), b = floor(t.b * 255.0 + 0.5), dirP = floor(b / 64.0), dist = mod(b, 64.0), pop = t.a;
-      float ever = bit(fl, 1.0), linked = bit(fl, 2.0), locked = bit(fl, 4.0), plate = bit(fl, 8.0), shine = bit(fl, 16.0), gate = bit(fl, 32.0), band = bit(fl, 64.0), rock = bit(fl, 128.0);
+      float dirt = t.r, fl = floor(t.g * 255.0 + 0.5), b = floor(t.b * 255.0 + 0.5), dirP = floor(b / 64.0), dist = mod(b, 64.0), age = t.a;
+      float ever = bit(fl, 1.0), linked = bit(fl, 2.0), locked = bit(fl, 4.0), plate = bit(fl, 8.0), shine = bit(fl, 16.0), gate = bit(fl, 32.0), settle = bit(fl, 64.0), rock = bit(fl, 128.0);
       vec3 col;
-      if (plate > 0.5) { // clean foundation under buildings, pads and gate pads
-        vec2 e = min(f, 1.0 - f); float seam = 1.0 - smoothstep(0.0, 0.035, min(e.x, e.y));
-        col = uPlate * (0.95 + 0.05 * h(cell)) * (1.0 - 0.14 * seam);
-      } else if (rock > 0.5) col = uRegolith * (1.0 + 0.12 * vn(g * 4.0));
+      if (plate > 0.5) col = deckSurface(g, f, cell, 1.0, 0.0, 0.0, 0.0, 0.0) * 1.05;       // foundations: station already powered
+      else if (rock > 0.5) col = regolith(g, vec3(0.0, 1.0, 0.0)) * 0.92;
       else {
-        if (dirt < 0.003 && ever > 0.5) col = litSurface(g, f, linked, pop, dirP, dist, shine);
-        else if (ever > 0.5) col = uDull * (0.9 + 0.1 * vn(g * 2.0));
-        else col = uRegolith * (0.88 + 0.16 * vn(g * 2.5));
-        // fluffy dust: soft height normal from the mask gradient + two noise scales, darker rim at the clean edge
+        float lit = dirt < 0.003 && ever > 0.5 ? 1.0 : 0.0;
+        float on = lit * (settle < 0.5 && age < 0.999 ? step(0.4, h(cell + floor(age * 14.0))) * smoothstep(0.0, 0.15, age) + step(0.85, age) * 0.6 : 1.0); // power-up flicker
+        col = deckSurface(g, f, cell, on, linked * lit, dirP, dist, shine * lit);
+        if (lit < 0.5) col *= uUnpow;                                                           // dark, unpowered deck (also after a storm)
+        // regolith dust from the mask: soft height normal from its gradient, darker rim at the clean edge, contact shade on the clean side
         vec2 px = 1.0 / uMaskSize; float d = texture2D(uMask, mu).r;
         float gx = texture2D(uMask, mu + vec2(px.x, 0.0)).r - texture2D(uMask, mu - vec2(px.x, 0.0)).r;
         float gy = texture2D(uMask, mu + vec2(0.0, px.y)).r - texture2D(uMask, mu - vec2(0.0, px.y)).r;
-        float fluff = vn(g * 14.0) * 0.6 + vn(g * 42.0) * 0.4;
-        vec3 N = normalize(vec3(-gx * 2.2 + (fluff - 0.5) * 0.45, 1.0, -gy * 2.2 + (vn(g * 14.0 + 5.0) - 0.5) * 0.45));
+        if (settle > 0.5) d *= smoothstep(0.0, 1.0, age);                                       // storm dust settles in
         float cover = smoothstep(0.03, 0.12, d);
-        vec3 dust = uDust * (0.86 + 0.24 * fluff) * (0.7 + 0.42 * max(dot(N, uSun), 0.0));
-        dust *= 1.0 - 0.34 * (cover - smoothstep(0.12, 0.35, d));
-        col *= 1.0 - 0.2 * smoothstep(0.0, 0.05, d) * (1.0 - cover);       // contact shade on the clean side
-        col = mix(col, dust, cover * mix(0.35, 1.0, d * d));
+        vec3 dust = regolith(g, vec3(-gx * 2.2, 1.0, -gy * 2.2));
+        dust *= 1.0 - 0.3 * (cover - smoothstep(0.12, 0.35, d));
+        col *= 1.0 - 0.2 * smoothstep(0.0, 0.05, d) * (1.0 - cover);
+        col = mix(col, dust, cover * mix(0.4, 1.0, d * d));
       }
-      if (locked > 0.5) col = mix(col, vec3(dot(col, vec3(0.333))), 0.5) * 0.5;
-      if (gate > 0.5 && mod(cell.x + cell.y, 2.0) < 1.0) col = mix(col, vec3(1.0, 0.78, 0.34), 0.7);
-      if (band > 0.5) col = mix(col, vec3(0.98, 0.6, 0.45), 0.12 + 0.08 * sin(uTime * 8.0));
-      gl_FragColor = vec4(col, 1.0);
+      if (locked > 0.5) { // sealed sector: hull rim and a closed hatch marker show faintly through the dust
+        vec2 sq = g - (floor(g / 24.0) * 24.0 + 12.0), se = min(mod(g, 24.0), 24.0 - mod(g, 24.0));
+        float rim = 1.0 - smoothstep(0.25, 0.4, min(se.x, se.y));
+        float ring = 1.0 - smoothstep(0.08, 0.16, abs(length(sq) - 2.4)), bars = step(length(sq), 2.4) * (1.0 - smoothstep(0.08, 0.16, abs(sq.x - sq.y) * 0.7071)) + step(length(sq), 2.4) * (1.0 - smoothstep(0.08, 0.16, abs(sq.x + sq.y) * 0.7071));
+        col *= 0.94; col = mix(col, uSeam, 0.35 * max(rim, max(ring, min(bars, 1.0))));
+      }
+      if (gate > 0.5 && mod(cell.x + cell.y, 2.0) < 1.0) col = mix(col, vec3(1.0, 0.78, 0.34), 0.55);
+      // station hull rim around the whole deck: bevelled trim with marker lights, partly buried by regolith spilling over the edge
+      float dE = min(min(g.x, g.y), min(uGrid.x - g.x, uGrid.y - g.y));
+      if (dE < 0.9) {
+        float trim = 1.0 - step(0.32, dE), top = smoothstep(0.0, 0.12, dE) * (1.0 - smoothstep(0.2, 0.32, dE));
+        vec3 tc = uTrim * (0.78 + 0.35 * top);
+        float along = dE == g.x || dE == uGrid.x - g.x ? g.y : g.x;
+        float mk = (1.0 - smoothstep(0.06, 0.1, length(vec2(fract(along / 4.0) * 4.0 - 2.0, dE - 0.16)))) ;
+        tc = mix(tc, uMarker * (0.8 + 0.4 * sin(uTime * 2.0 + along)), mk);
+        col = mix(col, tc, trim);
+        float n = vn(g * 2.7) * 0.6 + vn(g * 8.0) * 0.4, spill = smoothstep(0.48, 0.62, n + (0.55 - dE) * 0.9);
+        col = mix(col, regolith(g, vec3(0.0, 1.0, 0.0)), spill);
+      }
+      gl_FragColor = vec4(alarm(col), 1.0);
     }`,
 });
 // push the sim's changed mask rectangle to the GPU (texSubImage2D on the dirty region only; a new game re-binds the whole array)
@@ -193,6 +229,9 @@ const groundGeo = new THREE.PlaneGeometry(C, R); groundGeo.rotateX(-Math.PI / 2)
 scene.add(new THREE.Mesh(groundGeo, groundMat));
 
 // terrain around the map: gentle bumps and craters, curving away to the Moon sphere (same radius) toward the horizon
+const terrainMat = new THREE.ShaderMaterial({ uniforms: { uSun: sunU, uReg: regU, uAlarm: alarmU },
+  vertexShader: 'varying vec3 vW; varying vec3 vN; void main(){ vW = (modelMatrix * vec4(position, 1.0)).xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0); }',
+  fragmentShader: 'precision highp float; varying vec3 vW; varying vec3 vN;' + REGOLITH_GLSL + ' void main(){ gl_FragColor = vec4(alarm(regolith(vW.xz, normalize(vN))), 1.0); }' });
 const MOON_R = 150, MOON_C = new THREE.Vector3(C / 2, -0.4 - MOON_R, R / 2);
 const CRATERS = [[-14, 20, 5], [62, 8, 7], [58, 60, 4.5], [-10, 66, 6], [20, -12, 6], [70, 90, 8], [-22, 45, 4], [30, 86, 5], [80, 35, 5], [5, 95, 7], [-40, -10, 9], [95, 70, 9]];
 function terrainH(x, z) {
@@ -207,11 +246,11 @@ function terrainH(x, z) {
     const u = pos.getX(i), v = pos.getY(i), x = C / 2 + u * Math.sqrt(1 - v * v / 2) * 140, z = R / 2 - v * Math.sqrt(1 - u * u / 2) * 140;
     pos.setXYZ(i, x, terrainH(x, z), z);
   }
-  g.computeVertexNormals(); scene.add(new THREE.Mesh(g, toon(0x8e88a3, {}, false))); }
-const moon = new THREE.Mesh(new THREE.IcosahedronGeometry(MOON_R, 4), toon(0x7d7793, {}, false)); moon.position.copy(MOON_C); scene.add(moon);
+  g.computeVertexNormals(); scene.add(new THREE.Mesh(g, terrainMat)); }
+const moon = new THREE.Mesh(new THREE.IcosahedronGeometry(MOON_R, 4), terrainMat); moon.position.copy(MOON_C); scene.add(moon);
 for (let i = 0; i < 16; i++) { // craters on the far side of the sphere (planet view)
   const a = i * 2.39996, d = 0.6 + (i % 5) * 0.12, dir = new THREE.Vector3(Math.cos(a) * d, 1, Math.sin(a) * d).normalize();
-  const cr = new THREE.Mesh(new THREE.CircleGeometry(5 + (i % 4) * 3, 14), toon(0x6c6682, {}, false)); cr.position.copy(MOON_C).addScaledVector(dir, MOON_R + 0.3); cr.lookAt(MOON_C.clone().addScaledVector(dir, 300)); scene.add(cr);
+  const cr = new THREE.Mesh(new THREE.CircleGeometry(5 + (i % 4) * 3, 14), toon(0x7a7290, {}, false)); cr.position.copy(MOON_C).addScaledVector(dir, MOON_R + 0.3); cr.lookAt(MOON_C.clone().addScaledVector(dir, 300)); scene.add(cr);
 }
 // sky: stars + Earth (placed each frame in the upper sky of the view; seen when the camera pulls back to the planet)
 { const g = new THREE.BufferGeometry(), p = []; for (let i = 0; i < 900; i++) { const v = new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.9 - 0.1, Math.random() - 0.5).normalize().multiplyScalar(900); p.push(v.x + C / 2, v.y, v.z + R / 2); } g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xfff1da, size: 1.7, sizeAttenuation: false }))); }
@@ -291,14 +330,16 @@ const canFill = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1, 0.52), new THREE.Me
 let toolGroup = null, toolKey = '', rackTool = null, rackKey = '', bobObj = body, bobY = 0.6, astro = null;
 // tool along local +x (= facing): handle from the hand to the head at `reach` (same value the sim sweeps with), head `w` tiles wide
 function buildTool(tier, w, reach) {
-  const g = new THREE.Group(), hx = reach, hy = 0.12, ax = 0.22, ay = 0.75, hw = w * 0.95;
-  const hd = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, Math.hypot(hx - ax, ay - hy), 6), lam(0xc9c2d6)); hd.position.set((ax + hx) / 2, (ay + hy) / 2, 0); hd.rotation.z = Math.atan2(hx - ax, ay - hy); g.add(hd);
-  if (ASSETS) { // toy head from the GLB (unit width, scaled across the facing)
-    const head = ASSETS.clone('tool' + Math.min(tier, 4)); head.position.x = hx; head.scale.z = hw; g.add(head);
-    if (tier >= 4) { const pk = ASSETS.clone('vacpack'); pk.position.x = -0.62; g.add(pk); }
+  const g = new THREE.Group(), td = CONFIG.tools[tier] || {}, hx = reach, hy = 0.12, ax = 0.22, ay = 0.75, hw = w * 0.95, ride = td.ride || 0;
+  if (!ride) { const hd = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, Math.hypot(hx - ax, ay - hy), 6), lam(0xc9c2d6)); hd.position.set((ax + hx) / 2, (ay + hy) / 2, 0); hd.rotation.z = Math.atan2(hx - ax, ay - hy); g.add(hd); }
+  else { const arm = new THREE.Mesh(new THREE.BoxGeometry(hx - 0.3, 0.08, 0.16), lam(0x4a4560)); arm.position.set(0.3 + (hx - 0.3) / 2, 0.22, 0); g.add(arm); } // machines: a strut to the sweep head
+  if (ASSETS) { // head from the GLB (unit width, scaled across the facing); machine tiers add their body (walk-behind or ride-on)
+    const head = ASSETS.clone('tool' + tier); head.position.x = hx; head.scale.z = hw; g.add(head);
+    if (tier >= 4) { const v = addOutline(ASSETS.clone('veh' + tier)); v.position.x = ride ? 0.05 : hx - 0.55; g.add(v); g.userData.veh = v; }
     return g;
   }
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.14, hw), lam(tier ? 0xff8a3d : 0x3fc8b8)); head.position.set(hx, 0.12, 0); g.add(head);
+  if (ride) { const v = new THREE.Mesh(new THREE.BoxGeometry(1.2, ride, 0.9), lam(0xffc857)); v.position.y = ride / 2; g.add(v); g.userData.veh = v; }
   return g;
 }
 // keepers: faceless rounded-triangle drones + warm beam + blob shadow on the ground
@@ -324,7 +365,7 @@ function useAssets(gltf) {
   const lib = {};
   gltf.scene.traverse(o => { if (o.isMesh) o.material = toonOf(o.material); });
   for (const c of [...gltf.scene.children]) lib[c.name] = c;
-  ASSETS = { clone: n => lib[n].clone(true) };
+  ASSETS = { clone: n => lib[n].clone(true), has: n => !!lib[n] };
   const swap = (grp, n, ry = 0, x = 0, z = 0) => { grp.children.forEach(c => { if (c.isMesh && c.material !== blobMat && c !== tank && c !== fuelFill) c.visible = false; }); const o = addOutline(ASSETS.clone(n)); o.rotation.y = ry; o.position.set(x, 0, z); grp.add(o); return o; };
   body.visible = helmet.visible = canShell.visible = false;
   astro = addOutline(ASSETS.clone('astronaut')); player.add(astro); bobObj = astro.getObjectByName('astro_body'); bobY = 0;
@@ -343,12 +384,16 @@ function useAssets(gltf) {
   SP.assets = 'glb';
 }
 SP.assets = 'loading';
-new GLTFLoader().load('assets/sweep-assets.glb', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+new GLTFLoader().load('assets/sweep-assets.glb?v=pass2', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
 // code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
-const anim = { squash: 0, lastCan: 0, sweepT: 0 };
+const anim = { squash: 0, lastCan: 0, sweepT: 0, tierPop: 0, lastTool: 0 };
 function animatePlayer(S, p, dt) {
-  const walk = p.moving ? Math.sin(S.t * 14) : 0;
-  bobObj.position.y = bobY + Math.abs(walk) * 0.06; bobObj.rotation.x = astro ? walk * 0.08 : 0;
+  const td = toolDef(S), ride = td.ride || 0, walk = p.moving ? Math.sin(S.t * 14) : 0, veh = toolGroup && toolGroup.userData.veh;
+  // riders: the astronaut stands on the machine; the robot strides (body bob), the hover floats; walkers bob as before
+  const vb = !veh ? 0 : S.tool === 6 ? (p.moving ? Math.abs(Math.sin(S.t * 7)) * 0.09 : 0) : S.tool === 7 ? 0.06 + Math.sin(S.t * 3) * 0.05 : 0;
+  if (veh) veh.position.y = (veh.isMesh ? ride / 2 : 0) + vb;
+  if (astro) astro.position.y = ride + vb; else body.position.y = 0.6 + ride + vb;
+  bobObj.position.y = bobY + (ride ? 0 : Math.abs(walk) * 0.06); bobObj.rotation.x = astro ? walk * 0.08 : 0;
   if (S.can < anim.lastCan - 1e-6 && anim.lastCan - S.can > 0.05) anim.squash = 0.35; // sold at the Depot
   if (S.can > anim.lastCan + 1e-9) anim.sweepT = 0.25; anim.lastCan = S.can;
   anim.squash = Math.max(0, anim.squash - dt); anim.sweepT = Math.max(0, anim.sweepT - dt);
@@ -360,7 +405,7 @@ function animatePlayer(S, p, dt) {
 // dust puffs at the tool head while sweeping; a share of them is sucked into the canister
 const PUFF_MAX = 240, puffPos = new Float32Array(PUFF_MAX * 3), puffs = [], puffGeo = new THREE.BufferGeometry();
 puffGeo.setAttribute('position', new THREE.BufferAttribute(puffPos, 3));
-const puffPts = new THREE.Points(puffGeo, new THREE.PointsMaterial({ map: softTex([[0, 1], [0.5, 0.6], [1, 0]]), color: 0xe0d8ea, size: 0.3, transparent: true, opacity: 0.9, depthWrite: false })); puffPts.frustumCulled = false; scene.add(puffPts);
+const puffPts = new THREE.Points(puffGeo, new THREE.PointsMaterial({ map: softTex([[0, 1], [0.5, 0.6], [1, 0]]), color: 0xc3bbd0, size: 0.3, transparent: true, opacity: 0.9, depthWrite: false })); puffPts.frustumCulled = false; scene.add(puffPts);
 function stepPuffs(S, dt) {
   const p = S.player;
   if (anim.sweepT > 0 && p.moving && !S.headless) { const hp = headPos(S); for (let k = 0; k < 3 && puffs.length < PUFF_MAX; k++) { const suck = Math.random() < 0.4; puffs.push({ x: hp.x + (Math.random() - 0.5) * 0.6, y: 0.08, z: hp.y + (Math.random() - 0.5) * 0.6, vx: (Math.random() - 0.5) * 1.4, vy: 0.6 + Math.random() * 1.2, vz: (Math.random() - 0.5) * 1.4, life: suck ? 0.4 : 0.45 + Math.random() * 0.3, t: 0, suck }); } }
@@ -370,11 +415,36 @@ function stepPuffs(S, dt) {
     else { f.x += f.vx * dt; f.y += f.vy * dt; f.z += f.vz * dt; f.vy -= 2.5 * dt; f.vx *= 0.92; f.vz *= 0.92; } }
   puffs.forEach((f, i) => puffPos.set([f.x, Math.max(0.05, f.y), f.z], i * 3)); puffGeo.setDrawRange(0, puffs.length); puffGeo.attributes.position.needsUpdate = true;
 }
-// storm: wall of dust points
-const STORM_P = 1400, stormGeo = new THREE.BufferGeometry(), stormPos = new Float32Array(STORM_P * 3), stormSeed = new Float32Array(STORM_P * 3);
-for (let i = 0; i < STORM_P * 3; i++) stormSeed[i] = Math.random();
-stormGeo.setAttribute('position', new THREE.BufferAttribute(stormPos, 3));
-const stormPts = new THREE.Points(stormGeo, new THREE.PointsMaterial({ map: softTex([[0, 1], [1, 0]]), color: 0xcfc3d8, size: 0.35, transparent: true, opacity: 0.75, depthWrite: false })); stormPts.frustumCulled = false; scene.add(stormPts);
+// storm warning: rotating red beacons (lamp + light cone + point light) on the Depot, the Refinery and deck masts on the hull rim
+const beacons = [], beamMat = new THREE.MeshBasicMaterial({ color: 0xff3a2a, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
+const lampOff = new THREE.MeshBasicMaterial({ color: 0x6b2a2a }), lampOn = new THREE.MeshBasicMaterial({ color: 0xff4a3a });
+function beacon(x, y, z, mast, light) {
+  const g = new THREE.Group(); g.position.set(x, y, z); scene.add(g);
+  if (mast) { const m = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, y, 6), lam(0x8a8399)); m.position.y = -y / 2; g.add(m); }
+  const lamp = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 0.24, 10), lampOff); g.add(lamp);
+  const pivot = new THREE.Group(); g.add(pivot); pivot.visible = false;
+  for (const s of [1, -1]) { const c = new THREE.Mesh(new THREE.ConeGeometry(0.9, 3.2, 14, 1, true), beamMat); c.rotation.z = s * Math.PI / 2; c.position.x = s * 1.6; pivot.add(c); }
+  let pl = null; if (light) { pl = new THREE.PointLight(0xff3a2a, 0, 9, 1.6); g.add(pl); }
+  beacons.push({ lamp, pivot, pl }); return g;
+}
+beacon(DEPOT.c + 0.7, 2.0, DEPOT.r + 0.7, false, true); beacon(BLDG.refinery.c + 1, 2.85, BLDG.refinery.r + 1, false, true);
+for (const [x, z] of [[-0.6, 52], [-0.6, 68], [48.6, 58], [12, 72.6], [36, 72.6]]) beacon(x, 2.2, z, true, false);
+function stepAlarm(S) {
+  const st = S.storm, warn = st.phase === 'warn', on = warn ? 1 : 0, pulse = 0.5 + 0.5 * Math.sin(S.t * 9);
+  for (const b of beacons) { b.pivot.visible = warn; b.pivot.rotation.y = S.t * 5; b.lamp.material = warn && pulse > 0.3 ? lampOn : lampOff; if (b.pl) b.pl.intensity = on * (1.5 + 2.5 * pulse); }
+  alarmU.value = on * pulse;
+  hazeV += ((st.phase === 'blow' ? (st.count ? 0.34 : 0.18) : 0) - hazeV) * 0.05; // first storm: lighter haze
+}
+let hazeV = 0;
+// siren: WebAudio only (no files), two-tone rise and fall for the warning time; muted by Sound or Siren in the ⚙ panel
+let sirenOn = true;
+function siren(sec) {
+  if (!AC || !soundOn || !sirenOn) return;
+  const t0 = AC.currentTime, o = AC.createOscillator(), g = AC.createGain(); o.type = 'triangle';
+  o.frequency.setValueAtTime(520, t0); for (let k = 0, t = t0; t < t0 + sec; k++, t += 0.65) o.frequency.linearRampToValueAtTime(k % 2 ? 520 : 900, t + 0.65);
+  g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.045, t0 + 0.3); g.gain.setValueAtTime(0.045, t0 + sec - 0.4); g.gain.exponentialRampToValueAtTime(0.0001, t0 + sec);
+  o.connect(g).connect(AC.destination); o.start(t0); o.stop(t0 + sec + 0.05);
+}
 
 // visible flows: coins (player -> pay zone, Depot -> player) and dust (canister -> Depot), one InstancedMesh pool
 const FLOW_MAX = 96, flowMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.14, 0.14, 0.05, 12).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial(), FLOW_MAX), flows = [];
@@ -397,14 +467,14 @@ function stepFlows(dt) {
 // ----- per-frame world update -----
 const camState = { tx: 0, tz: 0, d: CAM.dist, ax: 0, az: 0, init: false };
 function writeTiles(S) {
-  const st = S.storm, band = st.phase === 'warn', g = nextGate(S), shimmer = LIT_LOOK.shimmerSec;
+  const g = nextGate(S), flick = LIT_LOOK.flickerSec;
   for (let i = 0; i < N; i++) {
     const o = i * 4, c = i % C, r = (i / C) | 0, sec = SEC[i], locked = !S.unlocked[sec], kd = KIND[i];
     let fl = (S.ever[i] ? 1 : 0) | (S.linked[i] ? 2 : 0) | (locked ? 4 : 0) | (kd === 1 || kd === 2 ? 8 : 0) | (S.shineUntil[i] > S.t ? 16 : 0) | (kd === 3 ? 128 : 0);
     if (g > 0 && sec === g && (c % 24 === 0 || c % 24 === 23 || r % 24 === 0 || r % 24 === 23)) fl |= 32;
-    if (band && r >= st.r0 && r < st.r0 + S.cfg.storm.bandRows) fl |= 64;
+    const sa = S.t - S.stormAt[i]; if (sa < SETTLE_SEC) fl |= 64;
     const age = S.t - S.popAt[i], pr = S.par[i], dir = pr === i - 1 ? 0 : pr === i + 1 ? 1 : pr === i - C ? 2 : 3; // Grid Link: direction to the parent tile
-    tileData[o] = Math.round(S.dirt[i] * 255); tileData[o + 1] = fl; tileData[o + 2] = (S.dist[i] & 63) | (dir << 6); tileData[o + 3] = age < shimmer ? Math.round(255 * age / shimmer) : 255;
+    tileData[o] = Math.round(S.dirt[i] * 255); tileData[o + 1] = fl; tileData[o + 2] = (S.dist[i] & 63) | (dir << 6); tileData[o + 3] = sa < SETTLE_SEC ? Math.round(255 * sa / SETTLE_SEC) : age < flick ? Math.round(255 * age / flick) : 255;
   }
   tileTex.needsUpdate = true;
 }
@@ -429,8 +499,8 @@ function updateWorld(S, realDt) {
   camState.tx += (p.x + camState.ax - camState.tx) * a; camState.tz += (p.y + camState.az - camState.tz) * a;
   const baseD = CAM.dist * (1 + CAM.widthZoom * (toolWidth(S) - 1));
   camState.d += (baseD - camState.d) * a;
-  const d = Math.exp(lerp(Math.log(camState.d), Math.log(CAM.planetDist), k)), tx = lerp(camState.tx, C / 2, k), tz = lerp(camState.tz, R / 2, k);
-  const st = S.storm; if (st.phase === 'blow' && st.front > -2 && st.front < C + 2) shake = 0.15; shake = Math.max(0, shake - realDt * 0.5);
+  const d = Math.exp(lerp(Math.log(camState.d * (1 + 0.45 * Math.sin(Math.PI * clamp(1 - anim.tierPop / 1.2, 0, 1)) * (anim.tierPop > 0 ? 1 : 0))), Math.log(CAM.planetDist), k)), tx = lerp(camState.tx, C / 2, k), tz = lerp(camState.tz, R / 2, k);
+  const st = S.storm; if (st.phase === 'blow' && st.front > -2 && st.front < C + 2) shake = st.count ? 0.15 : 0.08; shake = Math.max(0, shake - realDt * 0.5);
   const sh = shake * shake * 2;
   camera.position.set(tx + Math.sin(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh, Math.sin(pitch) * d, tz + Math.cos(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh);
   camera.lookAt(tx, 0, tz);
@@ -438,10 +508,12 @@ function updateWorld(S, realDt) {
   // player
   player.position.set(p.x, 0, p.y); player.rotation.y = -p.face;
   animatePlayer(S, p, realDt);
-  const w = toolWidth(S), key = S.tool + ':' + w; if (key !== toolKey) { toolKey = key; if (toolGroup) player.remove(toolGroup); toolGroup = buildTool(S.tool, w, S.cfg.tools[S.tool].reach || 0.9); player.add(toolGroup); }
-  toolGroup.scale.x = Math.max(0.3, headPos(S).d / (S.cfg.tools[S.tool].reach || 0.9)); // head stops at a wall or rock
+  const w = toolWidth(S), key = S.tool + ':' + w + (ASSETS ? 'a' : ''); if (key !== toolKey) { toolKey = key; if (toolGroup) player.remove(toolGroup); toolGroup = buildTool(S.tool, w, S.cfg.tools[S.tool].reach || 0.9); player.add(toolGroup); }
+  if (S.tool > anim.lastTool) anim.tierPop = 1.2; anim.lastTool = S.tool; anim.tierPop = Math.max(0, anim.tierPop - realDt); // tier-up: zoom out + silhouette pop
+  const tp = anim.tierPop > 0 ? Math.sin(Math.PI * (1 - anim.tierPop / 1.2)) : 0;
+  toolGroup.scale.set(Math.max(0.3, headPos(S).d / (S.cfg.tools[S.tool].reach || 0.9)) * (1 + 0.35 * tp), 1 + 0.35 * tp, 1 + 0.35 * tp); // head stops at a wall or rock
   const nt = S.cfg.tools[S.tool + 1], rk = nt ? String(S.tool + 1) : '';
-  if (rk !== rackKey) { rackKey = rk; if (rackTool) scene.remove(rackTool); rackTool = nt ? buildTool(S.tool + 1, nt.width, nt.reach || 0.9) : null; if (rackTool) { rackTool.position.set(BLDG.rack.c + 1.5, 1.35, BLDG.rack.r + 0.5); rackTool.rotation.z = 0.9; scene.add(rackTool); } }
+  if (rk !== rackKey) { rackKey = rk; if (rackTool) scene.remove(rackTool); rackTool = nt ? buildTool(S.tool + 1, nt.width, nt.reach || 0.9) : null; if (rackTool) { rackTool.position.set(BLDG.rack.c + 1.5, 1.35, BLDG.rack.r + 0.5); rackTool.rotation.z = nt.ride ? 0 : 0.9; rackTool.scale.setScalar(Math.min(1, 2.4 / Math.max(nt.width, (nt.reach || 1) + 0.8))); scene.add(rackTool); } }
   if (rackTool) rackTool.rotation.y = S.t;
   const ck = clamp(S.can / capKg(S), 0, 1), full = ck >= 0.999;
   canFill.scale.y = Math.max(0.001, ck * 0.7); canFill.position.y = 0.35 + ck * 0.35; canFill.material.color.setHex(full && Math.sin(S.t * 12) > 0 ? 0xff6b57 : 0xff8a3d);
@@ -472,14 +544,7 @@ function updateWorld(S, realDt) {
     if (z.pad.visible) z.label3d.userData.set(!ok ? (id === 'tool' ? 'MAX TOOL' : 'CREW FULL') : cost === 0 ? 'FREE' : (id === 'tool' ? pz.name(S) + ' ' : 'Keeper ') + '$' + fmt(cost - (S.zonePaid[id] || 0)), cost === 0 && ok ? PAL.mint : z.bg);
   }
   stepFlows(realDt); stepPuffs(S, realDt);
-  // storm wall
-  stormPts.visible = st.phase === 'blow';
-  if (stormPts.visible) {
-    const bh = S.cfg.storm.bandRows;
-    for (let i = 0; i < STORM_P; i++) { const s0 = stormSeed[i * 3], s1 = stormSeed[i * 3 + 1], s2 = stormSeed[i * 3 + 2];
-      stormPos[i * 3] = st.front - st.dir * s0 * s0 * 7 + (Math.random() - 0.5) * 0.3; stormPos[i * 3 + 1] = s2 * s2 * 3 + Math.sin(S.t * 6 + i) * 0.1; stormPos[i * 3 + 2] = st.r0 + s1 * bh; }
-    stormGeo.attributes.position.needsUpdate = true;
-  }
+  stepAlarm(S);
   moon.visible = true;
 }
 const inZone = (S, z) => inRectT(S.player.x, S.player.y, z);
@@ -506,7 +571,7 @@ const hudCoins = [], coinTicks = []; let cashBump = 0; // overlay juice: coins f
 const CASH_PILL = { x: 30, y: 30 };
 function moneyFlows(S, dt) {
   const p = S.player, hop = { x: DEPOT_C.x, z: DEPOT_C.y };
-  if (S.can < flowPrev.can - 1e-6 && inRectT(p.x, p.y, SELL)) { for (let i = 0; i < 8; i++) flow(p.x, p.y, hop.x, hop.z, 0xd8d0e4, i * 0.03); const s0 = toScreen(hop.x, 2, hop.z); for (let i = 0; i < 10; i++) hudCoins.push({ x: s0.x, y: s0.y, t: -0.25 - i * 0.05, sx: (Math.random() - 0.5) * 60 }); }
+  if (S.can < flowPrev.can - 1e-6 && (inRectT(p.x, p.y, SELL) || toolDef(S).autoDumpSec)) { for (let i = 0; i < 8; i++) flow(p.x, p.y, hop.x, hop.z, 0xd8d0e4, i * 0.03); const s0 = toScreen(hop.x, 2, hop.z); for (let i = 0; i < 10; i++) hudCoins.push({ x: s0.x, y: s0.y, t: -0.25 - i * 0.05, sx: (Math.random() - 0.5) * 60 }); }
   const g = nextGate(S), paid = (S.gatePaid || 0) + Object.values(S.zonePaid || {}).reduce((a, b) => a + b, 0);
   flowPrev.coinT -= dt;
   if (paid > flowPrev.paid + 1e-9 && flowPrev.coinT <= 0) {
@@ -533,7 +598,7 @@ function tone(f, dur = 0.08, type = 'sine', vol = 0.06, delay = 0) {
 function playSfx(kind, n) {
   if (kind === 'lit') tone(523.25 * Math.pow(2, (n || 0) * 2 / 12), 0.09, 'triangle', 0.07);
   else if (kind === 'sell') { tone(196, 0.12, 'square', 0.03); tone(294, 0.12, 'square', 0.03, 0.07); }
-  else if (kind === 'warn') { tone(110, 0.5, 'sawtooth', 0.025); tone(98, 0.5, 'sawtooth', 0.025, 0.5); }
+  else if (kind === 'warn') siren(G.cfg.storm.warningSec);
   else if (kind === 'gate') [523, 659, 784].forEach((f, i) => tone(f, 0.18, 'triangle', 0.05, i * 0.08));
   else if (kind === 'tool') [392, 523, 659, 1046].forEach((f, i) => tone(f, 0.16, 'triangle', 0.05, i * 0.07));
   else if (kind === 'keeper') { tone(880, 0.1, 'sine', 0.05); tone(1320, 0.12, 'sine', 0.04, 0.08); }
@@ -681,7 +746,13 @@ function drawOverlay(S) {
   for (const [id, b] of Object.entries(HUD_BTN)) { if (id === 'map' && !(S.stardust > 0)) continue; pill(b.x, b.y, b.w, b.h, id === 'map' ? PAL.purple : PAL.orange); ctx.fillStyle = id === 'map' ? PAL.plum : PAL.cream; ctx.font = '900 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(b.label + (id === 'map' ? ' ★' + S.stardust : ''), b.x + b.w / 2, b.y + b.h / 2 + 4); }
   if (showFuel(S)) { bar(W - 104, HUD_H + 28, 96, 14, S.fuel / cfg.refinery.tankKg, PAL.purple, 'Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg); ctx.fillStyle = PAL.cream; ctx.font = '10px system-ui'; ctx.textAlign = 'right'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W - 8, HUD_H + 54); }
   const st = S.storm;
-  if (st.phase === 'warn') { pill(95, HUD_H + 8, 190, 28, PAL.red); ctx.fillStyle = PAL.cream; ctx.font = '900 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DUST STORM in ' + Math.ceil(st.blowAt - S.t), W / 2 - 0, HUD_H + 26); }
+  if (st.phase === 'warn') {
+    const pu = 0.5 + 0.5 * Math.sin(S.t * 9), e = 70;
+    for (const [x0, y0, x1, y1, x, y, w, hh] of [[0, 0, e, 0, 0, 0, e, H], [W, 0, W - e, 0, W - e, 0, e, H], [0, 0, 0, e, 0, 0, W, e], [0, H, 0, H - e, 0, H - e, W, e]]) {
+      const gr = ctx.createLinearGradient(x0, y0, x1, y1); gr.addColorStop(0, 'rgba(255,60,45,' + (0.38 * pu) + ')'); gr.addColorStop(1, 'rgba(255,60,45,0)'); ctx.fillStyle = gr; ctx.fillRect(x, y, w, hh); }
+    pill(95, HUD_H + 8, 190, 28, PAL.red); ctx.fillStyle = PAL.cream; ctx.font = '900 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DUST STORM ' + Math.max(1, Math.ceil(st.blowAt - S.t)) + '…', W / 2, HUD_H + 26);
+  }
+  if (hazeV > 0.005) { ctx.fillStyle = 'rgba(154,145,168,' + hazeV + ')'; ctx.fillRect(0, 0, W, H); } // airborne dust haze on impact
   const sid = activeSheet(S); if (sid) drawSheet(S, sid);
   const f = !S.popup && !sid && activeFtue(S);
   if (f) { ctx.font = 'bold 13px system-ui'; const tw = Math.min(W - 16, ctx.measureText(f.text).width + 20), by = st.phase === 'warn' ? HUD_H + 42 : HUD_H + 10; pill(W / 2 - tw / 2, by, tw, 26, PAL.cream); ctx.fillStyle = PAL.plum; ctx.textAlign = 'center'; ctx.fillText(f.text, W / 2, by + 17, tw - 12); }
@@ -761,7 +832,7 @@ let G = startGame(), speed = 1, fps = 0, frameMs = 0;
 const panel = document.getElementById('panel');
 function buildPanel() {
   let h = '<h3>Time</h3>' + [1, 4, 10].map(s => `<button data-speed="${s}" class="${speed === s ? 'on' : ''}">x${s}</button>`).join('') +
-    `<button id="bReset">Reset</button><button id="bSkip">Skip 1 hour (offline)</button><button id="bCash">+$1000</button><button id="bSnd" class="${soundOn ? 'on' : ''}">Sound</button><button id="bZoom">Zoom to planet</button>`;
+    `<button id="bReset">Reset</button><button id="bSkip">Skip 1 hour (offline)</button><button id="bCash">+$1000</button><button id="bSnd" class="${soundOn ? 'on' : ''}">Sound</button><button id="bSiren" class="${sirenOn ? 'on' : ''}">Siren</button><button id="bZoom">Zoom to planet</button>`;
   h += '<button id="bCheat">Cheats (` or tap cash 5×)</button>';
   h += '<h3>Camera</h3>' + ['pitchDeg', 'yawDeg', 'dist', 'fov'].map(k => `<label style="display:flex;justify-content:space-between">${k} <input type="number" step="any" data-cam="${k}" value="${CAM[k]}" style="width:70px"></label>`).join('');
   h += '<h3>Telemetry (this session)</h3><pre id="tele"></pre><button id="bCopy">Copy JSON</button>';
@@ -776,6 +847,7 @@ function buildPanel() {
   panel.querySelector('#bSkip').onclick = () => { skipOffline(G, 60); panel.style.display = 'none'; };
   panel.querySelector('#bCash').onclick = () => { G.cash += 1000; };
   panel.querySelector('#bSnd').onclick = () => { soundOn = !soundOn; buildPanel(); };
+  panel.querySelector('#bSiren').onclick = () => { sirenOn = !sirenOn; buildPanel(); };
   panel.querySelector('#bZoom').onclick = () => { G.zoomAt = G.t; panel.style.display = 'none'; };
   panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G), cheats: G.tele.cheats || [] }, null, 1));
   const apply = reset => { try { const v = JSON.parse(panel.querySelector('#cfg').value); for (const k of Object.keys(CONFIG)) delete CONFIG[k]; Object.assign(CONFIG, v); panel.querySelector('#cfgErr').textContent = ' applied'; if (reset) G = startGame(); } catch (e) { panel.querySelector('#cfgErr').textContent = ' ' + e.message; } };
@@ -803,6 +875,7 @@ function selfTest3d() {
   for (let i = 0; i < 10; i++) stepPayZones(T, 0.05); const toolHalf = T.tool === 0 && T.zonePaid.tool > 0;
   for (let i = 0; i < 30; i++) stepPayZones(T, 0.05); r.toolPayZone = toolHalf && T.tool === 1 && Math.abs(T.cash) < 1e-6 && T.zonePaid.tool === 0;
   T.crewOpen = true; T.player.x = ZONES.crew.c + 1; T.player.y = ZONES.crew.r + 1; stepPayZones(T, 0.05); r.freeKeeper = T.keepers.length === 1;
+  if (ASSETS) r.toolAssets = CONFIG.tools.every((t, k) => ASSETS.has('tool' + k) && (k < 4 || ASSETS.has('veh' + k)));
   r.padsOutsideDepot = Object.values(ZONES).every(z => z.c >= DEPOT.c + DEPOT.w || z.c + z.w <= DEPOT.c || z.r >= DEPOT.r + DEPOT.h || z.r + z.h <= DEPOT.r);
   r.inputMatchesCamera = Math.abs(v.x + Math.sin(yaw)) < 1e-9 && Math.abs(v.y + Math.cos(yaw)) < 1e-9; // "up" on screen = away from camera
   r.pass = Object.entries(r).every(([k, v]) => k === 'pass' || v === true);
@@ -816,7 +889,7 @@ function benchFrames(n = 120) {
 }
 const selfTestResult = selfTest3d();
 console.log('[selfTest]', selfTestResult);
-Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.defineProperty(SP, 'frameMs', { get: () => frameMs }); Object.assign(SP, { LIT_LOOK, benchFrames, writeTiles, animatePlayer, maskStats, toggleCheat, CHEATS, cheat, updateWorld, drawOverlay, stepPayZones, moneyFlows, ZONES, selfTest3d, renderer, scene, camera, inputVec, CAM });
+Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.defineProperty(SP, 'frameMs', { get: () => frameMs }); Object.assign(SP, { GROUND, stepAlarm, LIT_LOOK, benchFrames, writeTiles, animatePlayer, maskStats, toggleCheat, CHEATS, cheat, updateWorld, drawOverlay, stepPayZones, moneyFlows, ZONES, selfTest3d, renderer, scene, camera, inputVec, CAM });
 
 let last = performance.now(), teleTimer = 0, logMin = 0, fpsN = 0, fpsT = 0;
 function frame(now) {

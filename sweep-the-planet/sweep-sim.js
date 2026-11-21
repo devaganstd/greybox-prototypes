@@ -8,18 +8,25 @@
 // a 100% clean tile is Lit and pays $/s while it stays clean; Dust Storms re-dust Lit tiles; Keeper Drones re-clean them.
 // ===== CONFIG: every tunable lives here (concept §13.2; values changed by greybox tuning are marked "tuned") =====
 const CONFIG = {
-  grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 800, 2000, 6000] }, // tuned (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
+  grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 800, 1700, 5000] }, // tuned (2026-11-22 tool ladder: 2000/6000 -> 1700/5000, launch 26-29 min) (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
   player: { speed: 5.4 /* tiles per second; 4.0 tile greybox, 4.8 fine dust mask, 5.4 with buildings and rocks to walk around */ },
   // pricePerKg: concept 1.0, 4.0 in the tile greybox, 4.5 with the fine dust mask, 5.0 with collision. sub = mask cells per tile side; a tile is Lit at
   // >= litCleanFrac clean cells; brushDepth = brush size along the facing; brushPad = brush a bit wider than `width` so strokes overlap.
   dust: { kgPerTile: 0.25, pricePerKg: 5.0, sub: 6, litCleanFrac: 0.95, brushDepth: 0.5, brushPad: 0.1 },
   lit: { powerPerTile: 0.0015 /* $ per second; tuned (concept 0.01 = Lit beat sales in minute 1, Launch at 9 min) */, gridLinkMult: 2, linkRecalcSec: 1 },
+  // Tool ladder (owner 2026-11-22): 8 tiers, each with its own head (brush) and feel. turnRate = momentum (rad/s the facing can turn,
+  // speed drops while turning); ride = the astronaut rides the machine (3D seat height); autoDumpSec = the canister empties to the Depot
+  // on its own; rocksPassable = rocks do not block (robot strides over them, hover floats over them). Launch is paced at about tier 5
+  // (bot: tier 5 at ~22:30, launch 27-28 min); costs tuned 2026-11-22.
   tools: [
     { id: 'Toothbrush', reach: 0.8, width: 1, passes: 3, capKg: 10, speedMult: 1.0, cost: 0 },
-    { id: 'Scrub Brush', reach: 0.9, width: 1, passes: 2, capKg: 15, speedMult: 1.0, cost: 45 }, // cost 80 before the fine dust mask (keeps GB1 <= 60 s)
-    { id: 'Mop', reach: 1.1, brush: 'round', width: 2, passes: 2, capKg: 20, speedMult: 1.0, cost: 400, shineMult: 1.25, shineSec: 60 },
-    { id: 'Push Broom', reach: 1.3, width: 3, passes: 1, capKg: 30, speedMult: 1.0, cost: 1200 }, // cost tuned (concept 2000)
-    { id: 'Vacuum Pack', reach: 1.2, brush: 'round', width: 3, passes: 1, capKg: 60, speedMult: 1.0, cost: 5000, suctionRadius: 1 }, // cost tuned (concept 9000)
+    { id: 'Mop', reach: 1.0, brush: 'round', width: 2, passes: 2, capKg: 15, speedMult: 1.0, cost: 45, shineMult: 1.25, shineSec: 60 },
+    { id: 'Wide Mop', reach: 1.1, width: 3, passes: 1.5, capKg: 22, speedMult: 1.0, cost: 300 },
+    { id: 'Push Broom', reach: 1.3, width: 4, passes: 1, capKg: 30, speedMult: 1.0, cost: 800 },
+    { id: 'Floor Scrubber', reach: 1.25, width: 5, passes: 1, capKg: 50, speedMult: 1.0, cost: 1400, turnRate: 3.5 },
+    { id: 'Ride-on Sweeper', reach: 1.5, width: 7, passes: 1, capKg: 80, speedMult: 1.05, cost: 5000, turnRate: 2.6, ride: 0.62, autoDumpSec: 30 },
+    { id: 'Sweeper Robot', reach: 1.8, width: 9, passes: 1, capKg: 120, speedMult: 1.0, cost: 12000, ride: 1.3, rocksPassable: true },
+    { id: 'Hover Sweeper', reach: 1.5, width: 11, passes: 1, capKg: 160, speedMult: 1.25, cost: 30000, ride: 0.55, rocksPassable: true },
   ],
   upgrades: {
     growth: 1.15,
@@ -92,9 +99,9 @@ const markRect = (b, k) => { for (let r = b.r; r < b.r + b.h; r++) for (let c = 
 for (const k of ROCKS) KIND[k.r * C + k.c] = 3;
 const SWEEPABLE = KIND.reduce((n, k) => n + (k ? 0 : 1), 0);
 // circle (radius rad) vs SOLIDS boxes and ROCKS circles
-function blocked(x, y, rad) {
+function blocked(x, y, rad, noRocks) {
   for (const s of SOLIDS) if (x > s.x0 - rad && x < s.x1 + rad && y > s.y0 - rad && y < s.y1 + rad) return true;
-  for (const k of ROCKS) if ((x - k.x) * (x - k.x) + (y - k.y) * (y - k.y) < (k.rad + rad) * (k.rad + rad)) return true;
+  if (!noRocks) for (const k of ROCKS) if ((x - k.x) * (x - k.x) + (y - k.y) * (y - k.y) < (k.rad + rad) * (k.rad + rad)) return true;
   return false;
 }
 function pushOut(o, rad) { // move a circle out of any solid (Keepers); returns true if it was inside
@@ -244,7 +251,7 @@ function passTile(S, i, amt, collect) { // one pass over the whole tile (Keepers
 // the brush; cells already under the brush in the previous stamp do not (so standing or pushing slowly is not free scrubbing).
 function headPos(S) { // the head stops in front of a building or rock (d = actual handle reach, for the 3D tool)
   const p = S.player, rc = toolDef(S).reach || 0.9, fx = Math.cos(p.face), fy = Math.sin(p.face); let d = rc;
-  for (let k = 1; k * 0.1 <= rc + 1e-9; k++) if (blocked(p.x + fx * k * 0.1, p.y + fy * k * 0.1, 0)) { d = (k - 1) * 0.1; break; }
+  for (let k = 1; k * 0.1 <= rc + 1e-9; k++) if (blocked(p.x + fx * k * 0.1, p.y + fy * k * 0.1, 0, toolDef(S).rocksPassable)) { d = (k - 1) * 0.1; break; }
   return { x: p.x + fx * d, y: p.y + fy * d, d };
 }
 function brushStamp(S, ax, ay, bx, by) {
@@ -274,12 +281,17 @@ function brushStamp(S, ax, ay, bx, by) {
 }
 function walkable(S, x, y) {
   if (x < 0.25 || y < 0.25 || x > C - 0.25 || y > R - 0.25) return false;
-  return S.unlocked[SEC[Math.floor(y) * C + Math.floor(x)]] && !blocked(x, y, 0.3);
+  return S.unlocked[SEC[Math.floor(y) * C + Math.floor(x)]] && !blocked(x, y, 0.3, toolDef(S).rocksPassable);
 }
 function movePlayer(S, ix, iy, dt) {
   const p = S.player, len = Math.hypot(ix, iy); p.moving = len > 0.01;
   if (!p.moving) return;
   if (len > 1) { ix /= len; iy /= len; }
+  const td = toolDef(S);
+  if (td.turnRate) { // machines: the facing turns at most turnRate rad/s and the machine slows while turning (wide turns)
+    const m = Math.min(1, len), da = Math.atan2(Math.sin(Math.atan2(iy, ix) - p.face), Math.cos(Math.atan2(iy, ix) - p.face)), f = p.face + clamp(da, -td.turnRate * dt, td.turnRate * dt), k = Math.max(0.25, Math.cos(da));
+    ix = Math.cos(f) * m * k; iy = Math.sin(f) * m * k;
+  }
   const sp = playerSpeed(S) * dt;
   if (walkable(S, p.x + ix * sp, p.y)) p.x += ix * sp;
   if (walkable(S, p.x, p.y + iy * sp)) p.y += iy * sp;
@@ -299,7 +311,7 @@ function recalcLinks(S) {
       L[j] = 1; S.dist[j] = S.dist[i] + 1; S.par[j] = i; q[t++] = j;
     }
   }
-  const lit = S.cfg.lit, shine = S.cfg.tools[2] ? S.cfg.tools[2].shineMult || 1 : 1;
+  const lit = S.cfg.lit, shine = (S.cfg.tools.find(t => t.shineMult) || {}).shineMult || 1;
   let sum = 0, linkedN = 0;
   for (let i = 0; i < N; i++) if (!KIND[i] && S.dirt[i] === 0 && S.ever[i]) {
     const m = (L[i] ? lit.gridLinkMult : 1) * (S.shineUntil[i] > S.t ? shine : 1); sum += m; if (L[i]) linkedN++;
@@ -363,6 +375,8 @@ function step(S, dt, input) {
   if (input) movePlayer(S, input.x, input.y, dt); else S.player.moving = false;
   const p = S.player;
   if (inRectT(p.x, p.y, SELL)) sell(S);
+  const ad = toolDef(S).autoDumpSec; // Ride-on: the canister empties to the Depot on its own
+  if (ad && (S.dumpT = (S.dumpT ?? ad) - dt) <= 0) { S.dumpT = ad; if (S.can > 0) { sell(S); S.tele.autoDumps = (S.tele.autoDumps || 0) + 1; } }
   const g = nextGate(S);
   if (g > 0 && inRectT(p.x, p.y, PADS[g])) {
     if (!S.payFlow) unlockGate(S, g);
@@ -477,7 +491,7 @@ function teleSummary(S) {
   const roll = (i, k) => full.slice(Math.max(0, i - 1), i + 2).reduce((a, m) => a + m[k], 0), beats = i => i >= full.length || roll(i, 'lit') > roll(i, 'sell');
   let cross = null; for (let i = 0; i < full.length; i++) if (beats(i) && beats(i + 1)) { cross = full[i].m; break; }
   return {
-    t: Math.round(S.t), firstLit: T.firstLit, firstUpgrade: T.firstUpgrade, keeper1: T.keeperAt[1], keeper3: T.keeperAt[3], tier2: T.tierAt[1], tier3: T.tierAt[2], tier4: T.tierAt[3], tier5: T.tierAt[4],
+    t: Math.round(S.t), firstLit: T.firstLit, firstUpgrade: T.firstUpgrade, keeper1: T.keeperAt[1], keeper3: T.keeperAt[3], tier2: T.tierAt[1], tier3: T.tierAt[2], tier4: T.tierAt[3], tier5: T.tierAt[4], tier6: T.tierAt[5], tierAtLaunch: S.tool + 1,
     gates: Object.assign({}, T.gateAt), launchAt: T.launchAt, litBeatsSellMin: cross, storms: T.storms,
     uptimeK3: T.upK3[1] ? +(100 * T.upK3[0] / T.upK3[1]).toFixed(1) : null, uptimeK0: T.upK0[1] ? +(100 * T.upK0[0] / T.upK0[1]).toFixed(1) : null,
     up: Object.assign({}, S.up), moon: +(100 * S.everCount / SWEEPABLE).toFixed(1), lit: +(100 * S.litCount / SWEEPABLE).toFixed(1), fuel: Math.round(S.fuel), cash: Math.round(S.cash), minutes: mins,
@@ -496,7 +510,7 @@ function botReport(seeds = [1, 2, 3], overrides = {}) {
     GB4_uptime3Keepers: act.map(r => r.uptimeK3), GB4_uptimeNoKeeper: nok.map(r => r.uptimeK0),
     passiveIdleUptime3K: pasK.map(r => r.idleUptime), passiveIdleUptime0K: pas0.map(r => r.idleUptime),
     noKeeperLaunchMin: nok.map(r => r.launchAt && +(r.launchAt / 60).toFixed(1)),
-    milestones: act.map(r => ({ keeper1: mmss(r.keeper1), tier2: mmss(r.tier2), tier3: mmss(r.tier3), tier4: mmss(r.tier4), tier5: mmss(r.tier5), gates: Object.fromEntries(Object.entries(r.gates).map(([k, v]) => [k, mmss(v)])) })),
+    milestones: act.map(r => ({ keeper1: mmss(r.keeper1), tier2: mmss(r.tier2), tier3: mmss(r.tier3), tier4: mmss(r.tier4), tier5: mmss(r.tier5), tier6: mmss(r.tier6), tierAtLaunch: r.tierAtLaunch, gates: Object.fromEntries(Object.entries(r.gates).map(([k, v]) => [k, mmss(v)])) })),
     avg: { launchMin: avg(act.map(r => r.launchAt && r.launchAt / 60)), uptimeK3: avg(act.map(r => r.uptimeK3)), uptimeK0: avg(nok.map(r => r.uptimeK0)) },
     runs: { act, nok },
   };
@@ -520,6 +534,13 @@ function selfTest() {
   }
   Object.assign(out, ok);
   out.stormHappened = S.tele.storms >= 2;
+  // tool ladder: each tier's brush cleans a band at least its width across (straight stroke up through free floor, row 51)
+  out.toolTiers = CONFIG.tools.length === 8 && CONFIG.tools.every((td, k) => {
+    const Z = newGame(clone(CONFIG), { headless: true, tool: k }); Z.player.x = 14; Z.player.y = 54.6; Z.player.face = -Math.PI / 2;
+    for (let n = 0; n < 16; n++) step(Z, 0.05, { x: 0, y: -1 });
+    let band = 0; for (let c = 0; c < 24; c++) if (Z.dirt[51 * C + c] < 1) band++;
+    return band >= td.width;
+  });
   // layout: every footprint cell (plates, pads, gate pads, rocks) is clean at start and after the storms above; rects never overlap
   const fpClean = X => { for (let i = 0; i < N; i++) if (KIND[i]) { if (X.dirt[i] !== 0) return false; const c = i % C, r = (i / C) | 0; for (let y = 0; y < X.SUB; y++) for (let x = 0; x < X.SUB; x++) if (X.sub[(r * X.SUB + y) * X.MW + c * X.SUB + x]) return false; } return true; };
   out.footprintClean = fpClean(newGame(clone(CONFIG), { headless: true })) && fpClean(S);
@@ -543,10 +564,10 @@ function selfTest() {
   const H = newGame(clone(CONFIG), { headless: true }); H.player.x = 5.5; H.player.y = 60.5; H.player.face = 0; step(H, 0.05, { x: 1, y: 0 });
   out.headSweeps = H.dirt[60 * C + 6] < 1 && H.dirt[60 * C + 5] === 1;
   H.tool = 3; H.player.x = 10.5; H.player.y = 55.5; H.player.face = -Math.PI / 2; 
-  step(H, 0.05, { x: 0, y: -1 }); // Push Broom stroke upward: head ~ row 54, three columns wide
+  step(H, 0.05, { x: 0, y: -1 }); // Push Broom stroke upward: head ~ row 54, four columns wide (8.5-12.5)
   const hit = c => H.dirt[53 * C + c] < 1 || H.dirt[54 * C + c] < 1;
   const edge = c => Math.min(H.dirt[53 * C + c], H.dirt[54 * C + c]) > 0.9; // brushPad only grazes the neighbours
-  out.widthAcross = [9, 10, 11].every(hit) && edge(8) && edge(12);
+  out.widthAcross = [8, 9, 10, 11, 12].every(hit) && edge(7) && edge(13);
   // a tile is Lit once 95% of its fine cells are clean, and a storm re-dusts its cells
   const F = newGame(clone(CONFIG), { headless: true }), j = 60 * C + 5, SB = F.SUB;
   for (let y = 0; y < SB; y++) for (let x = 0; x < SB; x++) if (y || x) F.sub[(60 * SB + y) * F.MW + 5 * SB + x] = 0;

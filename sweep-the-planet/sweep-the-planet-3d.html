@@ -109,7 +109,7 @@ function blob(parent, sx, sz, x = 0, z = 0) { const m = new THREE.Mesh(blobGeo, 
 // the seams are the light lanes: each tile next to a seam carries a short lane light that powers up (warm flicker, flickerSec) when the
 // tile turns Lit, and the Lit tile brightens its plate softly. Hatches on ~1 in 12 plates. A storm-dusted tile goes dark (unpowered).
 // Grid Link = the lane seam glowing warm, pulsing toward the Depot. LIT_LOOK + deckSurface() are the single place for this look.
-const LIT_LOOK = { deck: 0xa49eb3, seam: 0x6f6982, strip: 0xffc47a, stripOff: 0x7d778f, link: 0xffa94d, linkGlow: 0.5, gloss: 0.12, flickerSec: 0.7, unpowered: 0.9, plate: 4, hatchOdds: 1 / 12 };
+const LIT_LOOK = { deck: 0xdcdde4, seam: 0x9c9dad, strip: 0xffc47a, stripOff: 0x7d778f, link: 0xffa94d, linkGlow: 0.5, gloss: 0.14, flickerSec: 0.7, unpowered: 0.86, plate: 4, hatchOdds: 1 / 12 };
 const GROUND = { regolith: 0x9a91a8, trim: 0x8a8399, marker: 0xff8a3d };
 // P0-3: per-planet palette (index = sim S.planet). Mercury = orange regolith, yellow-hot sky, the Sun instead of Earth.
 const PLANET_LOOK = [
@@ -198,7 +198,7 @@ const groundMat = new THREE.ShaderMaterial({
         if (settle > 0.5) d *= smoothstep(0.0, 1.0, age);                                       // storm dust settles in
         float cover = smoothstep(0.02, 0.3, d);
         vec3 dust = regolith(g, vec3(-gx * 1.1, 1.0, -gy * 1.1));
-        dust *= 1.0 - 0.12 * (cover - smoothstep(0.3, 0.6, d));                                // faint rim where the dust thins
+        dust *= 1.0 - 0.28 * (cover - smoothstep(0.3, 0.6, d));                                // faint rim where the dust thins
         col = mix(col, dust, cover * mix(0.55, 1.0, d));
       }
       if (locked > 0.5) { // sealed sector: hull rim and a closed hatch marker show faintly through the dust

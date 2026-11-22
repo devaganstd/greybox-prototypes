@@ -21,6 +21,10 @@
   #cheat button.on{background:#ff7a5a;color:#111}
   #cheat .row{margin:4px 0}
   #cheat small{color:#c9a0a0;display:block;margin-top:6px}
+  #cap{position:fixed;left:0;right:0;bottom:0;height:52px;z-index:8;display:none;align-items:center;justify-content:center;gap:6px;background:#0d0a18;font:12px system-ui}
+  #cap button{background:#2a303a;color:#eee;border:1px solid #445;border-radius:6px;padding:7px 9px;cursor:pointer}
+  #cap button.rec{background:#ff4a3a;color:#fff}
+  #cap span{color:#b9b0cf;min-width:70px}
   #err{position:fixed;left:8px;right:8px;top:80px;z-index:6;background:#5a1d1d;color:#fff;padding:10px;border-radius:8px;font:12px monospace;display:none;white-space:pre-wrap}
 </style>
 </head>
@@ -30,8 +34,9 @@
 <div id="panel"></div>
 <div id="cheat"></div>
 <div id="err"></div>
+<div id="cap"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=pass4d"></script>
+<script src="sweep-sim.js?v=p0"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -42,7 +47,9 @@
 //   meta/progress = HUD (cash + $/s, Moon % bar + Grid %, Shop, later Fuel / Star Map).
 import * as THREE from 'three'; // importmap above: GLTFLoader imports the bare 'three' specifier
 import { GLTFLoader } from './lib/addons/loaders/GLTFLoader.js';
-const W = 390, H = 844, HUD_H = 60;
+// P0-2 creative capture: ?capture=s1|s2|s3 = UI-off 9:16 frame (390 x 693), fixed seed, scripted camera, record bar outside the frame.
+const CAPTURE = ((new URLSearchParams(location.search).get('capture') || '').toLowerCase().match(/^s[123]$/) || [null])[0];
+const W = 390, H = CAPTURE ? 693 : 844, HUD_H = 60;
 // in-world pads: rects come from the sim (PADZ, clean foundation, outside the Depot so they never sell). kind: 'panel' opens a sheet, 'pay' is a pay zone.
 // One palette for world and UI: plum night, cream buildings, warm orange accent, soft lilac Moon; pad colours below.
 const PAL = { plum: '#2b2640', plumHi: '#3a3354', cream: '#FFF6E8', orange: '#FF8A3D', yellow: '#FFC857', teal: '#3FC8B8', mint: '#8EE3B5', purple: '#B48CFF', red: '#FF6B57', mute: '#b9b0cf' };
@@ -63,7 +70,8 @@ const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
 renderer.setClearColor(0x141022);
 let scale = 1;
 function resize() {
-  scale = Math.min(innerWidth / W, innerHeight / H); const dpr = Math.min(window.devicePixelRatio || 1, 2), cw = W * scale, ch = H * scale;
+  const capH = CAPTURE ? 52 : 0; wrap.style.top = CAPTURE ? 'calc(50% - 26px)' : ''; // capture: record bar below the frame, never in it
+  scale = Math.min(innerWidth / W, (innerHeight - capH) / H); const dpr = Math.min(window.devicePixelRatio || 1, 2), cw = W * scale, ch = H * scale;
   wrap.style.width = cw + 'px'; wrap.style.height = ch + 'px';
   renderer.setPixelRatio(dpr); renderer.setSize(cw, ch, true);
   ui.style.width = cw + 'px'; ui.style.height = ch + 'px'; ui.width = Math.round(cw * dpr); ui.height = Math.round(ch * dpr);
@@ -103,6 +111,11 @@ function blob(parent, sx, sz, x = 0, z = 0) { const m = new THREE.Mesh(blobGeo, 
 // Grid Link = the lane seam glowing warm, pulsing toward the Depot. LIT_LOOK + deckSurface() are the single place for this look.
 const LIT_LOOK = { deck: 0xa49eb3, seam: 0x6f6982, strip: 0xffc47a, stripOff: 0x7d778f, link: 0xffa94d, linkGlow: 0.5, gloss: 0.12, flickerSec: 0.7, unpowered: 0.9, plate: 4, hatchOdds: 1 / 12 };
 const GROUND = { regolith: 0x9a91a8, trim: 0x8a8399, marker: 0xff8a3d };
+// P0-3: per-planet palette (index = sim S.planet). Mercury = orange regolith, yellow-hot sky, the Sun instead of Earth.
+const PLANET_LOOK = [
+  { regolith: GROUND.regolith, trim: GROUND.trim, clear: 0x141022, rock: 0x8c86a0, crater: 0x7a7290, earth: true },
+  { regolith: 0xd98a45, trim: 0xc27a3a, clear: 0x2a1608, rock: 0xb0703a, crater: 0xb86a30, earth: false },
+];
 const SETTLE_SEC = 1.2; // storm dust settles into the mask over this long (no floor wave)
 const sunU = { value: sun.position.clone().normalize() }, regU = { value: v3(GROUND.regolith) }, alarmU = { value: 0 };
 const REGOLITH_GLSL = `
@@ -249,10 +262,10 @@ function terrainH(x, z) {
     pos.setXYZ(i, x, terrainH(x, z), z);
   }
   g.computeVertexNormals(); scene.add(new THREE.Mesh(g, terrainMat)); }
-const moon = new THREE.Mesh(new THREE.IcosahedronGeometry(MOON_R, 4), terrainMat); moon.position.copy(MOON_C); scene.add(moon);
+const moon = new THREE.Mesh(new THREE.IcosahedronGeometry(MOON_R, 4), terrainMat); moon.position.copy(MOON_C); scene.add(moon); const craters = [];
 for (let i = 0; i < 16; i++) { // craters on the far side of the sphere (planet view)
   const a = i * 2.39996, d = 0.6 + (i % 5) * 0.12, dir = new THREE.Vector3(Math.cos(a) * d, 1, Math.sin(a) * d).normalize();
-  const cr = new THREE.Mesh(new THREE.CircleGeometry(5 + (i % 4) * 3, 14), toon(0x7a7290, {}, false)); cr.position.copy(MOON_C).addScaledVector(dir, MOON_R + 0.3); cr.lookAt(MOON_C.clone().addScaledVector(dir, 300)); scene.add(cr);
+  const cr = new THREE.Mesh(new THREE.CircleGeometry(5 + (i % 4) * 3, 14), toon(0x7a7290, {}, false)); cr.position.copy(MOON_C).addScaledVector(dir, MOON_R + 0.3); cr.lookAt(MOON_C.clone().addScaledVector(dir, 300)); scene.add(cr); craters.push(cr);
 }
 // sky: stars + Earth (placed each frame in the upper sky of the view; seen when the camera pulls back to the planet)
 { const g = new THREE.BufferGeometry(), p = []; for (let i = 0; i < 900; i++) { const v = new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.9 - 0.1, Math.random() - 0.5).normalize().multiplyScalar(900); p.push(v.x + C / 2, v.y, v.z + R / 2); } g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xfff1da, size: 1.7, sizeAttenuation: false }))); }
@@ -264,6 +277,16 @@ const earth = new THREE.Group(); scene.add(earth);
   const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
   earth.add(new THREE.Mesh(new THREE.SphereGeometry(30, 32, 20), toon(0xffffff, { map: tex }, false)));
   earth.add(new THREE.Mesh(new THREE.SphereGeometry(33, 32, 20), new THREE.MeshBasicMaterial({ color: 0x9fc8ff, transparent: true, opacity: 0.22, side: THREE.BackSide }))); }
+const sunDisc = new THREE.Group(); scene.add(sunDisc); // Mercury sky: a big hot Sun where Earth would be
+sunDisc.add(new THREE.Mesh(new THREE.SphereGeometry(70, 24, 16), new THREE.MeshBasicMaterial({ color: 0xffe27a })));
+sunDisc.add(new THREE.Mesh(new THREE.SphereGeometry(95, 24, 16), new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.25, side: THREE.BackSide })));
+let lookPlanet = -1;
+function applyPlanet(S) {
+  if (S.planet === lookPlanet) return; lookPlanet = S.planet; const L = PLANET_LOOK[S.planet] || PLANET_LOOK[0];
+  regU.value = v3(L.regolith); groundMat.uniforms.uTrim.value = v3(L.trim); renderer.setClearColor(L.clear); document.body.style.background = '#' + L.clear.toString(16).padStart(6, '0');
+  rockSolid.material.color.setHex(L.rock); rockDecor.material.color.setHex(L.rock); craters.forEach(c => c.material.color.setHex(L.crater));
+  earth.visible = L.earth; sunDisc.visible = !L.earth;
+}
 
 // rocks: solid ones from the sim (ROCKS, blocking), decor rocks + pebbles around the map; instanced, geometry swapped for the GLB's
 const rockSolid = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42), toon(0x8c86a0), ROCKS.length);
@@ -390,7 +413,7 @@ function useAssets(gltf) {
   SP.assets = 'glb';
 }
 SP.assets = 'loading';
-new GLTFLoader().load('assets/sweep-assets.glb?v=pass4', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+new GLTFLoader().load('assets/sweep-assets.glb?v=pass4', g => { useAssets(g); LOAD.assets = performance.now(); }, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
 // code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
 const anim = { squash: 0, lastCan: 0, sweepT: 0, tierPop: 0, lastTool: 0 };
 function animatePlayer(S, p, dt) {
@@ -561,7 +584,11 @@ function updateWorld(S, realDt) {
   const sh = shake * shake * 2;
   camera.position.set(tx + Math.sin(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh, Math.sin(pitch) * d, tz + Math.cos(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh);
   camera.lookAt(tx, 0, tz);
-  camera.updateMatrixWorld(); tmpV.set(-0.45, 0.78, 0.5).unproject(camera).sub(camera.position).normalize(); earth.position.copy(camera.position).addScaledVector(tmpV, 1000); earth.rotation.y = S.t * 0.02;
+  if (cine) { // P0-3 launch cinematic: camera low beside the pad, tilting up with the rocket
+    const lp = bc(BLDG.launch), ry = rocket.position.y;
+    camera.position.set(lp.x + 17 + (Math.random() - 0.5) * 0.2, 4 + ry * 0.6, lp.z + 26 + (Math.random() - 0.5) * 0.2); camera.lookAt(lp.x, 5 + ry, lp.z);
+  } else if (capCam) { camera.position.set(capCam.x, capCam.y, capCam.z); camera.lookAt(capCam.lx, capCam.ly, capCam.lz); }
+  camera.updateMatrixWorld(); tmpV.set(-0.45, 0.78, 0.5).unproject(camera).sub(camera.position).normalize(); earth.position.copy(camera.position).addScaledVector(tmpV, 1000); earth.rotation.y = S.t * 0.02; sunDisc.position.copy(earth.position);
   // player
   player.position.set(p.x, 0, p.y); player.rotation.y = -p.face;
   animatePlayer(S, p, realDt);
@@ -584,7 +611,8 @@ function updateWorld(S, realDt) {
   });
   // Depot / Refinery / Launch Pad / pads
   const fk = S.fuel / S.cfg.refinery.tankKg; fuelFill.scale.y = Math.max(0.001, fk * 1.8); fuelFill.position.y = 0.4 + fk * 0.9;
-  const ready = canLaunch(S); rocketNose.material.color.setHex(ready && Math.sin(S.t * 6) > 0 ? 0xffc857 : 0xff8a3d); rocket.position.y = ready ? Math.abs(Math.sin(S.t * 3)) * 0.15 : 0;
+  const ready = canLaunch(S); rocketNose.material.color.setHex(ready && Math.sin(S.t * 6) > 0 ? 0xffc857 : 0xff8a3d); rocket.position.y = cine ? Math.pow(cine.t / CINE_SEC, 2.2) * 70 : ready ? Math.abs(Math.sin(S.t * 3)) * 0.15 : 0;
+  if (cine) { const lp = bc(BLDG.launch); for (let i = 0; i < 6; i++) spark(lp.x + (Math.random() - 0.5) * 1.6, rocket.position.y + 0.6, lp.z + (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 3, -6 - Math.random() * 4, (Math.random() - 0.5) * 3, 0.6, i % 2 ? 0xffc857 : 0xff8a3d, -2); for (let i = 0; i < 3; i++) puff(lp.x + (Math.random() - 0.5) * 3, 0.3, lp.z + (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 4, 0.6, (Math.random() - 0.5) * 4, 1.2); shake = Math.max(shake, 0.25 * (1 - cine.t / CINE_SEC)); }
   const g = nextGate(S); gateGroup.visible = gateLabel.visible = g > 0;
   if (g > 0) {
     const pd = PADS[g], cost = gateCost(S, g), paid = clamp(S.gatePaid / cost, 0, 1), vert = (pd.c + 1) % 24 === 0; // pad straddles a vertical or horizontal border
@@ -602,7 +630,7 @@ function updateWorld(S, realDt) {
   }
   stepFlows(realDt); stepPuffs(S, realDt); stepFx(S, realDt);
   stepAlarm(S);
-  moon.visible = true;
+  moon.visible = true; applyPlanet(S);
 }
 const inZone = (S, z) => inRectT(S.player.x, S.player.y, z);
 // pay zones handled in this layer (sector gates are a pay zone inside the sim). Same rule as the sim gate: cash drains over
@@ -684,7 +712,7 @@ const SHEETS = {
   refinery: { h: 150, title: 'REFINERY: DUST TO FUEL', rows: FUEL_STEPS.map((v, i) => ({ id: 'fuel', v, x: 10 + i * 75, y: 62, w: 70, h: 46 })) },
   launch: { h: 160, title: 'LAUNCH PAD', rows: [{ id: 'launch', x: 95, y: 56, w: 200, h: 56 }] },
 };
-const activeSheet = S => !S.popup && Object.keys(SHEETS).find(id => S.zoneReady && S.zoneReady[id] && inZone(S, ZONES[id]));
+const activeSheet = S => !S.popup && !cine && Object.keys(SHEETS).find(id => S.zoneReady && S.zoneReady[id] && inZone(S, ZONES[id]));
 const HUD_BTN = { shop: { x: 282, y: 8, w: 60, h: 44, label: 'SHOP' }, map: { x: 282, y: 58, w: 60, h: 24, label: 'MAP' } };
 let toast = null;
 ui.addEventListener('pointerdown', e => {
@@ -692,8 +720,8 @@ ui.addEventListener('pointerdown', e => {
   if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch { AC = null; } }
   const p = toLocal(e);
   if (G.popup) {
-    if (G.popup.kind === 'launch') { G = startGame({ tool: G.tool, stardust: G.stardust, launches: G.launches }); camState.init = false; return; }
-    if (inRect(p, POP_BTN[0]) || inRect(p, POP_BTN[1])) { const m = inRect(p, POP_BTN[1]) ? 2 : 1; G.cash += G.popup.cash * m; G.earned += G.popup.cash * m; G.popup = null; }
+    if (G.popup.kind === 'launch') { flyToNextPlanet(); return; }
+    if (inRect(p, POP_BTN[0]) || inRect(p, POP_BTN[1])) { const m = inRect(p, POP_BTN[1]) ? 2 : 1; if (m === 2) ev(G, 'ad_accept', { placement: 'offline_x2', stub: true }); G.cash += G.popup.cash * m; G.earned += G.popup.cash * m; G.popup = null; }
     return;
   }
   if (p.y < HUD_H && p.x < 120) { const now = performance.now(); cheatTaps = cheatTaps.filter(t => now - t < 2000); cheatTaps.push(now); if (cheatTaps.length >= 5) { cheatTaps = []; toggleCheat(); } return; }
@@ -703,7 +731,7 @@ ui.addEventListener('pointerdown', e => {
     const top = H - SHEETS[sid].h;
     for (const b of SHEETS[sid].rows) if (inRect(p, { x: b.x, y: top + b.y, w: b.w, h: b.h })) {
       if (b.id === 'fuel') G.fuelShare = b.v;
-      else if (b.id === 'launch') { if (canLaunch(G)) G.popup = Object.assign({ kind: 'launch' }, launch(G)); }
+      else if (b.id === 'launch') startLaunch(G);
       else buy(G, b.id);
     }
     return;
@@ -715,7 +743,8 @@ const endJoy = e => { if (joy && e.pointerId === joy.id) joy = null; };
 ui.addEventListener('pointerup', endJoy); ui.addEventListener('pointercancel', endJoy);
 
 // ----- 2D overlay: HUD (batch7c R5/R8), canister bar over the player, goal arrow, pad sheets, popups -----
-const moonPct = (S, d) => (100 * S.everCount / SWEEPABLE).toFixed(d);
+const moonPct = (S, d) => (100 * S.everCount / S.sweepable).toFixed(d); // % of the planet's playable area (Mercury: sectors 1-2)
+const pName = S => planetDef(S).id;
 function bar(x, y, w, h, k, col, label) { ctx.fillStyle = 'rgba(43,38,64,.85)'; ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2); ctx.fill(); const kw = w * clamp(k, 0, 1); if (kw > 1) { ctx.fillStyle = col; ctx.beginPath(); ctx.roundRect(x, y, Math.max(h, kw), h, h / 2); ctx.fill(); } if (label) { ctx.fillStyle = PAL.cream; ctx.font = '800 10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(label, x + 6, y + h - 3); } }
 function pill(x, y, w, h, fill = 'rgba(43,38,64,.92)') { ctx.fillStyle = 'rgba(20,16,34,.35)'; ctx.beginPath(); ctx.roundRect(x, y + 3, w, h, h / 2); ctx.fill(); ctx.fillStyle = fill; ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2); ctx.fill(); }
 function coin(x, y, r) { ctx.fillStyle = '#e09a2a'; ctx.beginPath(); ctx.arc(x, y + r * 0.18, r, 0, 7); ctx.fill(); ctx.fillStyle = PAL.yellow; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.fillStyle = '#fff3c4'; ctx.beginPath(); ctx.arc(x - r * 0.3, y - r * 0.3, r * 0.28, 0, 7); ctx.fill(); }
@@ -730,7 +759,7 @@ function upIcon(id, x, y, col) {
 }
 const LABEL = { capacity: 'Capacity', width: 'Width', speed: 'Speed', payout: 'Payout', panelBoost: 'Panel Boost' };
 const EFFECT = { capacity: 'canister kg', width: 'sweep width', speed: 'walk speed', payout: 'sell price', panelBoost: 'panel $/s' };
-const showFuel = S => S.t > 240 || S.launches > 0; // Fuel joins the HUD at the fuel FTUE (minute 4), batch7c R8
+const showFuel = S => S.planet === 0 && (S.t > 240 || S.launches > 0); // Mercury teaser has no Launch yet // Fuel joins the HUD at the fuel FTUE (minute 4), batch7c R8
 const zoneC = z => ({ x: z.c + z.w / 2, z: z.r + z.h / 2 });
 function goalTarget(S) {
   if (S.can >= capKg(S) - 1e-6) return { x: DEPOT_C.x, z: DEPOT_C.y, label: 'Sell' };
@@ -769,17 +798,22 @@ function drawSheet(S, sid) {
   else if (sid === 'launch') ctx.fillText('Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg + ' · Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W / 2, top + 140);
   else ctx.fillText('walk off the pad to close', W / 2, H - 10);
 }
+function drawStormEdge(S) { // red pulsing screen edge while a storm warns
+  if (S.storm.phase !== 'warn') return; const pu = 0.5 + 0.5 * Math.sin(S.t * 9), e = 70;
+  for (const [x0, y0, x1, y1, x, y, w, hh] of [[0, 0, e, 0, 0, 0, e, H], [W, 0, W - e, 0, W - e, 0, e, H], [0, 0, 0, e, 0, 0, W, e], [0, H, 0, H - e, 0, H - e, W, e]]) {
+    const gr = ctx.createLinearGradient(x0, y0, x1, y1); gr.addColorStop(0, 'rgba(255,60,45,' + (0.38 * pu) + ')'); gr.addColorStop(1, 'rgba(255,60,45,0)'); ctx.fillStyle = gr; ctx.fillRect(x, y, w, hh); }
+}
 function drawOverlay(S) {
   const cfg = S.cfg; ctx.clearRect(0, 0, W, H);
   const k = zoomK(S);
   for (const f of S.fx) { const s = toScreen(f.x, 1.2 + (1.3 - f.life) * 1.2, f.y); if (s.behind) continue; ctx.globalAlpha = clamp(f.life * 2, 0, 1); ctx.fillStyle = f.col; if (f.type === 'dot') ctx.fillRect(s.x - 2, s.y - 2, 4, 4); else { ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(f.text, s.x, s.y); } }
   ctx.globalAlpha = 1;
-  if (k > 0.3) { ctx.globalAlpha = clamp((k - 0.3) / 0.4, 0, 1); ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 34px system-ui'; ctx.fillText('Moon ' + moonPct(S, 2) + '%', W / 2, HUD_H + 60); ctx.font = '13px system-ui'; ctx.fillStyle = '#ccc'; ctx.fillText(S.t < 4 ? 'one planet. one ' + cfg.tools[S.tool].id.toLowerCase() + '.' : S.litCount + ' panels lit', W / 2, HUD_H + 82); ctx.globalAlpha = 1; }
+  if (k > 0.3) { ctx.globalAlpha = clamp((k - 0.3) / 0.4, 0, 1); ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 34px system-ui'; ctx.fillText(pName(S) + ' ' + moonPct(S, 2) + '%', W / 2, HUD_H + 60); ctx.font = '13px system-ui'; ctx.fillStyle = '#ccc'; ctx.fillText(S.t < 4 ? (S.planet ? 'next planet. same ' : 'one planet. one ') + cfg.tools[S.tool].id.toLowerCase() + '.' : S.litCount + ' panels lit', W / 2, HUD_H + 82); ctx.globalAlpha = 1; }
   // canister bar over the player's head (status in-world, batch7c §6 Canister)
   const full = S.can >= capKg(S) - 1e-6;
-  if (k < 0.1) { const s = toScreen(S.player.x, 1.9, S.player.y); if (!s.behind) { bar(s.x - 26, s.y - 18, 52, 8, S.can / capKg(S), full && Math.sin(S.t * 12) > 0 ? PAL.red : PAL.orange); if (full) { ctx.fillStyle = PAL.red; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText('FULL', s.x, s.y - 22); } } }
+  if (k < 0.1 && !CAPTURE) { const s = toScreen(S.player.x, 1.9, S.player.y); if (!s.behind) { bar(s.x - 26, s.y - 18, 52, 8, S.can / capKg(S), full && Math.sin(S.t * 12) > 0 ? PAL.red : PAL.orange); if (full) { ctx.fillStyle = PAL.red; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText('FULL', s.x, s.y - 22); } } }
   // goal arrow
-  const tg = k < 0.1 && goalTarget(S);
+  const tg = k < 0.1 && !CAPTURE && goalTarget(S);
   if (tg) {
     const s = toScreen(tg.x, 0, tg.z);
     if (!s.behind && s.x > 20 && s.x < W - 20 && s.y > HUD_H + 20 && s.y < H - 20) { ctx.strokeStyle = PAL.yellow; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(s.x, s.y - 30, 6 + 3 * Math.sin(S.t * 6), 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = PAL.yellow; ctx.beginPath(); ctx.moveTo(s.x - 7, s.y - 22); ctx.lineTo(s.x + 7, s.y - 22); ctx.lineTo(s.x, s.y - 12); ctx.fill(); }
@@ -789,6 +823,7 @@ function drawOverlay(S) {
   }
   for (const q of coinTicks) { const s = toScreen(q.c + 0.5, 0.3 + q.t * 1.2, q.r + 0.5); if (s.behind) continue; ctx.globalAlpha = clamp((0.9 - q.t) * 3, 0, 1); coin(s.x, s.y, 5); }
   ctx.globalAlpha = 1;
+  if (CAPTURE) { drawStormEdge(S); if (hazeV > 0.005) { ctx.fillStyle = 'rgba(154,145,168,' + hazeV + ')'; ctx.fillRect(0, 0, W, H); } return; } // UI-off: world, floating text, storm vignette only
   for (const q of hudCoins) { if (q.t < 0) continue; const e = ease(clamp(q.t / 0.55, 0, 1)); coin(lerp(q.x + q.sx * Math.sin(Math.PI * e), CASH_PILL.x, e), lerp(q.y, CASH_PILL.y, e) - Math.sin(Math.PI * e) * 40, 7); }
   // HUD: chunky pills. Left cash + $/s, centre Moon % + bar + Grid %, right Shop (+ Star Map after the first Launch). Time and fps live in the ⚙ panel.
   const bump = 1 + Math.sin(Math.PI * cashBump / 0.25) * 0.12 * (cashBump > 0 ? 1 : 0);
@@ -801,14 +836,12 @@ function drawOverlay(S) {
   ctx.textAlign = 'left'; ctx.font = '900 14px system-ui'; ctx.fillStyle = PAL.cream; ctx.fillText(moonPct(S, 1) + '%', 166, 28);
   const up = S.everCount ? S.litCount / S.everCount : 1;
   ctx.textAlign = 'right'; ctx.font = '800 10px system-ui'; ctx.fillStyle = up >= 0.9 ? PAL.teal : up >= 0.7 ? PAL.yellow : PAL.red; ctx.fillText('Grid ' + Math.round(100 * up) + '%', 266, 27);
-  bar(146, 36, 118, 8, S.everCount / SWEEPABLE, PAL.teal);
+  bar(146, 36, 118, 8, S.everCount / S.sweepable, PAL.teal);
   for (const [id, b] of Object.entries(HUD_BTN)) { if (id === 'map' && !(S.stardust > 0)) continue; pill(b.x, b.y, b.w, b.h, id === 'map' ? PAL.purple : PAL.orange); ctx.fillStyle = id === 'map' ? PAL.plum : PAL.cream; ctx.font = '900 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(b.label + (id === 'map' ? ' ★' + S.stardust : ''), b.x + b.w / 2, b.y + b.h / 2 + 4); }
   if (showFuel(S)) { bar(W - 104, HUD_H + 28, 96, 14, S.fuel / cfg.refinery.tankKg, PAL.purple, 'Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg); ctx.fillStyle = PAL.cream; ctx.font = '10px system-ui'; ctx.textAlign = 'right'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W - 8, HUD_H + 54); }
   const st = S.storm;
   if (st.phase === 'warn') {
-    const pu = 0.5 + 0.5 * Math.sin(S.t * 9), e = 70;
-    for (const [x0, y0, x1, y1, x, y, w, hh] of [[0, 0, e, 0, 0, 0, e, H], [W, 0, W - e, 0, W - e, 0, e, H], [0, 0, 0, e, 0, 0, W, e], [0, H, 0, H - e, 0, H - e, W, e]]) {
-      const gr = ctx.createLinearGradient(x0, y0, x1, y1); gr.addColorStop(0, 'rgba(255,60,45,' + (0.38 * pu) + ')'); gr.addColorStop(1, 'rgba(255,60,45,0)'); ctx.fillStyle = gr; ctx.fillRect(x, y, w, hh); }
+    drawStormEdge(S);
     pill(95, HUD_H + 8, 190, 28, PAL.red); ctx.fillStyle = PAL.cream; ctx.font = '900 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText('DUST STORM ' + Math.max(1, Math.ceil(st.blowAt - S.t)) + '…', W / 2, HUD_H + 26);
   }
   if (hazeV > 0.005) { ctx.fillStyle = 'rgba(154,145,168,' + hazeV + ')'; ctx.fillRect(0, 0, W, H); } // airborne dust haze on impact
@@ -828,31 +861,35 @@ function drawOverlay(S) {
       for (const [i, l] of [[0, 'Collect'], [1, 'x2 (fake ad)']]) { const b = POP_BTN[i]; pill(b.x, b.y, b.w, b.h, i ? PAL.yellow : PAL.plumHi); ctx.fillStyle = i ? PAL.plum : PAL.cream; ctx.font = 'bold 14px system-ui'; ctx.fillText(l, b.x + b.w / 2, b.y + 34); }
     } else {
       ctx.fillStyle = PAL.yellow; ctx.font = 'bold 22px system-ui'; ctx.fillText('Launched!', W / 2, 362);
-      ctx.fillStyle = '#eee'; ctx.font = '14px system-ui'; ctx.fillText('Moon ' + P.litPct.toFixed(1) + '% Lit at ' + mmss(P.t), W / 2, 394);
+      ctx.fillStyle = '#eee'; ctx.font = '14px system-ui'; ctx.fillText(pName(S) + ' ' + P.litPct.toFixed(1) + '% Lit at ' + mmss(P.t), W / 2, 394);
       ctx.fillStyle = PAL.purple; ctx.font = 'bold 18px system-ui'; ctx.fillText('+' + P.stardust + ' Stardust', W / 2, 428);
-      ctx.fillStyle = '#999'; ctx.font = '11px system-ui'; ctx.fillText('Next planet not in greybox: Moon resets, tool kept.', W / 2, 468); ctx.fillText('Tap to continue', W / 2, 496);
+      ctx.fillStyle = '#999'; ctx.font = '11px system-ui'; ctx.fillText('Next stop: ' + nextPlanet(S).id + '. Tool + Stardust carried over.', W / 2, 468); ctx.fillStyle = PAL.yellow; ctx.font = 'bold 13px system-ui'; ctx.fillText('Tap to fly to ' + nextPlanet(S).id, W / 2, 496);
     }
   }
 }
+// P0-4 scripted FTUE (first 5 minutes, Moon only). Steps run in this order, one at a time; a step shows once its `when` holds and
+// completes on `done` (a step already satisfied completes the moment it is reached). force = time-scripted, cuts in even if earlier
+// steps are open: the storm (sim firstStormAtSec = 2:10) and the Fuel teaser (minute 4). Each completion logs ftue_step.
 const FTUE = [
   { id: 'move', text: 'Drag anywhere to sweep', when: S => S.t > 3, done: S => S.everCount >= 4 },
-  { id: 'lit', text: 'Clean tiles light up and pay $/s', when: S => S.everCount >= 4, done: S => S.ftue.shownAt.lit != null && S.t - S.ftue.shownAt.lit > 5 },
-  { id: 'depot', text: 'Canister full: walk into the Depot to sell', when: S => S.can >= capKg(S) - 1e-6, done: S => S.tele.firstSell != null },
-  { id: 'cap', text: 'Stand on UPGRADES to buy', when: S => canBuy(S, 'capacity'), done: S => S.tele.firstUpgrade != null, zone: 'terminal' },
-  { id: 'tool', text: 'Stand on the TOOL RACK to pay for a new tool', when: S => S.tool === 0 && canBuy(S, 'tool'), done: S => S.tool > 0, zone: 'tool' },
-  { id: 'gate', text: 'Stand on the gold pad to open a sector', when: S => nextGate(S) === 1 && S.cash >= gateCost(S, 1) - S.gatePaid, done: S => S.unlocked[1] },
-  { id: 'storm', text: 'Storm dusted your panels: sweep them again', when: S => S.stormed > 0, done: S => S.keepers.length > 0 || (S.ftue.shownAt.storm != null && S.t - S.ftue.shownAt.storm > 6) },
-  { id: 'keeper', text: 'Free Keeper Drone at the CREW BAY', when: S => canBuy(S, 'keeper'), done: S => S.keepers.length > 0, zone: 'crew' },
-  { id: 'fuel', text: 'REFINERY: Dust → Fuel. Full tank + 70% Lit = Launch', when: S => S.t > 240, done: S => inZone(S, ZONES.refinery) || (S.ftue.shownAt.fuel != null && S.t - S.ftue.shownAt.fuel > 12), zone: 'refinery' },
+  { id: 'lit', text: 'Clean tiles light up and pay $/s', when: S => S.everCount >= 4, done: S => S.t - S.ftue.shownAt.lit > 5 },
+  { id: 'depot', text: 'Canister full: walk into the Depot to sell', when: S => S.can >= capKg(S) - 1e-6 || S.tele.firstSell != null, done: S => S.tele.firstSell != null },
+  { id: 'cap', text: 'Stand on UPGRADES and buy Capacity', when: S => canBuy(S, 'capacity') || S.up.capacity > 0, done: S => S.up.capacity > 0, zone: 'terminal' },
+  { id: 'gate', text: 'Stand on the gold pad to open Sector 2', when: S => S.unlocked[1] || S.cash >= gateCost(S, 1) - S.gatePaid, done: S => S.unlocked[1] },
+  { id: 'storm', force: true, text: 'Dust Storm! Lit panels go dark: sweep them again', when: S => S.storm.count > 0 || S.storm.phase !== 'idle', done: S => S.keepers.length > 0 || (S.storm.count > 0 && S.t - S.ftue.shownAt.storm > 10) },
+  { id: 'keeper', text: 'Free Keeper Drone at the CREW BAY', when: S => canBuy(S, 'keeper') || S.keepers.length > 0, done: S => S.keepers.length > 0, zone: 'crew' },
+  { id: 'tool', text: 'Stand on the TOOL RACK for a bigger tool', when: S => canBuy(S, 'tool') || S.tool > 0, done: S => S.tool > 0, zone: 'tool' },
+  { id: 'fuel', force: true, text: 'REFINERY: Dust → Fuel. Full tank + 70% Lit = Launch', when: S => S.t > 240, done: S => inZone(S, ZONES.refinery) || S.t - S.ftue.shownAt.fuel > 12, zone: 'refinery' },
 ];
 function activeFtue(S) {
-  S.ftue.wantZone = null;
-  for (const f of FTUE) {
-    if (S.ftue.done[f.id]) continue;
-    if (f.done(S)) { S.ftue.done[f.id] = true; continue; }
-    if (f.when(S)) { S.ftue.shownAt[f.id] ??= S.t; S.ftue.wantZone = f.zone || null; return f; }
+  const F = S.ftue; F.wantZone = null;
+  if (S.planet > 0 || CAPTURE) return null;
+  for (const [n, f] of FTUE.entries()) if (!F.done[f.id] && F.shownAt[f.id] != null && f.done(S)) {
+    F.done[f.id] = true; ev(S, 'ftue_step', { step: n + 1, id: f.id, waitSec: +(S.t - F.shownAt[f.id]).toFixed(1) });
   }
-  return null;
+  const f = FTUE.find(x => x.force && !F.done[x.id] && x.when(S)) || FTUE.find(x => !F.done[x.id]);
+  if (!f || !f.when(S)) return null;
+  F.shownAt[f.id] ??= S.t; F.wantZone = f.zone || null; return f;
 }
 
 // ----- cheat panel (testing / demo): 5 quick taps on the cash counter, or the ` key, or the button in the tuning panel -----
@@ -872,8 +909,8 @@ const CHEATS = [
   ['Storm', [['Dust Storm now', stormNow]]],
   ['Time', [1, 4, 10].map(x => ['×' + x, () => { speed = x; }])],
   ['Offline', [['Skip 1 hour', S => skipOffline(S, 60)]]],
-  ['Launch', [['Launch now', S => { S.popup = Object.assign({ kind: 'launch' }, launch(S)); }]]],
-  ['Game', [['Reset', () => { G = startGame(); camState.init = false; }]]],
+  ['Launch', [['Launch now', S => { S.fuel = S.cfg.refinery.tankKg; cine = { t: 0, info: launch(S) }; }]]],
+  ['Game', [['Reset', () => { G = startGame(); camState.init = false; lookPlanet = -1; }]]],
 ];
 function buildCheat() {
   if (cheatEl.style.display !== 'block') return;
@@ -886,8 +923,41 @@ function buildCheat() {
 function toggleCheat() { cheatEl.style.display = cheatEl.style.display === 'block' ? 'none' : 'block'; buildCheat(); }
 
 // ----- tuning panel (same tools as 2D) -----
-function startGame(keep) { const S = newGame(CONFIG, keep); S.sfxFn = playSfx; S.payFlow = true; S.zonePaid = {}; return S; }
-let G = startGame(), speed = 1, fps = 0, frameMs = 0;
+// P0-5 analytics: every event = { name, ts (epoch ms), session, t (sim s), planet, ...props }, schema = SP.EVENT_SCHEMA (sweep-sim.js),
+// kept in localStorage (LS.ev) and exported from the ⚙ panel. P0-6 save: full sim state (sweep-sim.js serialize) every 10 s and on
+// visibilitychange; a save made with another CONFIG is refused and the game resets with a warning. Capture mode never reads or writes.
+const LS = { save: 'stp.save', moon: 'stp.save.moon', ev: 'stp.events' };
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); return true; } catch { return false; } };
+const lsDel = k => { try { localStorage.removeItem(k); } catch { } };
+const SESSION = Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36);
+let evLog = []; try { evLog = JSON.parse(lsGet(LS.ev) || '[]'); if (!Array.isArray(evLog)) evLog = []; } catch { evLog = []; }
+function logEv(name, props) { if (CAPTURE) return; evLog.push(Object.assign({ name, ts: Date.now(), session: SESSION }, props)); if (evLog.length > 20000) evLog.splice(0, evLog.length - 20000); }
+function wire(S) { S.sfxFn = playSfx; S.payFlow = true; S.zonePaid ??= {}; S.evFn = logEv; return S; }
+const nextPlanet = S => S.cfg.planets[Math.min(S.planet + 1, S.cfg.planets.length - 1)];
+function startGame(keep = {}, cfg = CONFIG) { const S = wire(newGame(cfg, keep)); ev(S, 'planet_enter', { to: planetDef(S).id, tool: S.tool + 1, stardust: S.stardust }); return S; }
+function saveNow() { if (CAPTURE) return; lsSet(LS.save, JSON.stringify(serialize(G))); lsSet(LS.ev, JSON.stringify(evLog)); }
+function loadGame() {
+  if (CAPTURE) return null; const raw = lsGet(LS.save); if (!raw) return null;
+  let S = null; try { S = deserialize(CONFIG, JSON.parse(raw)); } catch (e) { console.warn('[save] unreadable', e); }
+  if (!S) { lsDel(LS.save); toast = { text: 'CONFIG changed: save reset', until: performance.now() + 4000 }; console.warn('[save] save made with another CONFIG / version: starting a new game'); return null; }
+  return wire(S);
+}
+let cine = null, capCam = null; const CINE_SEC = 4;
+function startLaunch(S) { if (cine || !canLaunch(S)) return; cine = { t: 0, info: launch(S) }; sfx(S, 'tool'); } // rocket takes off, popup after CINE_SEC
+function flyToNextPlanet() { // after the Launch popup: archive this planet, start the next one with tool + Stardust
+  const P = G; if (!CAPTURE) lsSet(LS.moon + (P.planet ? '.' + P.planet : ''), JSON.stringify(serialize(P)));
+  G = startGame({ planet: Math.min(P.planet + 1, P.cfg.planets.length - 1), tool: P.tool, stardust: P.stardust, launches: P.launches }, P.cfg); camState.init = false; rocket.position.y = 0;
+}
+let G = loadGame() || startGame(), speed = 1, fps = 0, frameMs = 0;
+const LOAD = { firstFrame: null, assets: null, resumed: G.t > 0 };
+ev(G, 'session_start', { resumed: LOAD.resumed, cfg: cfgHash(CONFIG) });
+let sessionAt = performance.now();
+addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { ev(G, 'session_end', { dur: +((performance.now() - sessionAt) / 1000).toFixed(1) }); saveNow(); }
+  else { sessionAt = performance.now(); ev(G, 'session_start', { resumed: true, cfg: cfgHash(CONFIG) }); }
+});
+addEventListener('pagehide', saveNow);
 const panel = document.getElementById('panel');
 function buildPanel() {
   let h = '<h3>Time</h3>' + [1, 4, 10].map(s => `<button data-speed="${s}" class="${speed === s ? 'on' : ''}">x${s}</button>`).join('') +
@@ -895,6 +965,7 @@ function buildPanel() {
   h += '<button id="bCheat">Cheats (` or tap cash 5×)</button>';
   h += '<h3>Camera</h3>' + ['pitchDeg', 'yawDeg', 'dist', 'fov'].map(k => `<label style="display:flex;justify-content:space-between">${k} <input type="number" step="any" data-cam="${k}" value="${CAM[k]}" style="width:70px"></label>`).join('');
   h += '<h3>Telemetry (this session)</h3><pre id="tele"></pre><button id="bCopy">Copy JSON</button>';
+  h += '<h3>Analytics + save (P0-5 / P0-6)</h3><pre id="evInfo"></pre><button id="bExport">Export events JSON</button><button id="bSaveNow">Save now</button><button id="bWipe">Clear save + events</button>';
   h += '<h3>Bot (headless, seeds 1-3; same sim as 2D)</h3><button id="bBot">Run GB1-GB4 report</button><div id="botOut"></div>';
   h += '<h3>CONFIG (live; grid changes need Reset)</h3><textarea id="cfg" rows="18">' + JSON.stringify(CONFIG, null, 1) + '</textarea><button id="bApply">Apply</button><button id="bApplyReset">Apply + Reset</button><span id="cfgErr"></span>';
   h += '<h3>selfTest</h3><pre>' + JSON.stringify(selfTestResult) + '</pre>';
@@ -902,20 +973,31 @@ function buildPanel() {
   panel.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => { speed = +b.dataset.speed; buildPanel(); });
   panel.querySelectorAll('[data-cam]').forEach(i => i.onchange = () => { CAM[i.dataset.cam] = +i.value; camera.fov = CAM.fov; camera.updateProjectionMatrix(); });
   panel.querySelector('#bCheat').onclick = () => { panel.style.display = 'none'; toggleCheat(); };
-  panel.querySelector('#bReset').onclick = () => { G = startGame(); camState.init = false; };
+  panel.querySelector('#bReset').onclick = () => { G = startGame(); camState.init = false; lookPlanet = -1; };
   panel.querySelector('#bSkip').onclick = () => { skipOffline(G, 60); panel.style.display = 'none'; };
   panel.querySelector('#bCash').onclick = () => { G.cash += 1000; };
+  panel.querySelector('#bExport').onclick = () => { saveNow(); const blob = new Blob([JSON.stringify(exportEvents(), null, 1)], { type: 'application/json' }), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'stp-events-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '') + '.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
+  panel.querySelector('#bSaveNow').onclick = () => { saveNow(); buildPanel(); };
+  panel.querySelector('#bWipe').onclick = () => { lsDel(LS.save); lsDel(LS.moon); lsDel(LS.ev); evLog = []; G = startGame(); camState.init = false; lookPlanet = -1; buildPanel(); };
   panel.querySelector('#bSnd').onclick = () => { soundOn = !soundOn; buildPanel(); };
   panel.querySelector('#bSiren').onclick = () => { sirenOn = !sirenOn; buildPanel(); };
   panel.querySelector('#bZoom').onclick = () => { G.zoomAt = G.t; panel.style.display = 'none'; };
   panel.querySelector('#bCopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify({ config: CONFIG, telemetry: teleSummary(G), cheats: G.tele.cheats || [] }, null, 1));
-  const apply = reset => { try { const v = JSON.parse(panel.querySelector('#cfg').value); for (const k of Object.keys(CONFIG)) delete CONFIG[k]; Object.assign(CONFIG, v); panel.querySelector('#cfgErr').textContent = ' applied'; if (reset) G = startGame(); } catch (e) { panel.querySelector('#cfgErr').textContent = ' ' + e.message; } };
+  const apply = reset => { try { const v = JSON.parse(panel.querySelector('#cfg').value); for (const k of Object.keys(CONFIG)) delete CONFIG[k]; Object.assign(CONFIG, v); panel.querySelector('#cfgErr').textContent = ' applied'; if (reset) { G = startGame(); lookPlanet = -1; } } catch (e) { panel.querySelector('#cfgErr').textContent = ' ' + e.message; } };
   panel.querySelector('#bApply').onclick = () => apply(false); panel.querySelector('#bApplyReset').onclick = () => apply(true);
   panel.querySelector('#bBot').onclick = () => { const out = panel.querySelector('#botOut'); out.textContent = 'running (±10-30 s)...'; setTimeout(() => { const r = botReport(); delete r.runs; out.innerHTML = '<pre>' + JSON.stringify(r, null, 1) + '</pre>'; console.log('[bot]', r); }, 30); };
 }
+const exportEvents = () => ({ schema: 'stp.events.v1', exportedAt: new Date().toISOString(), cfg: cfgHash(CONFIG), device: navigator.userAgent, events: evLog });
+// P0-7: real frame intervals of the last 300 frames -> fps p50 / p95 (p95 = the slow tail: 95% of frames are at least this fast)
+const FT = new Float32Array(300); let ftN = 0;
+function perfText() {
+  const n = Math.min(ftN, FT.length); if (!n) return 'fps: measuring';
+  const a = Array.from(FT.subarray(0, n)).sort((x, y) => x - y), q = k => a[Math.min(n - 1, Math.floor(n * k))];
+  return `fps p50 ${Math.round(1000 / q(0.5))} | p95 ${Math.round(1000 / q(0.95))} (frame ${q(0.5).toFixed(1)} / ${q(0.95).toFixed(1)} ms, ${n} frames)\nload: first frame ${LOAD.firstFrame == null ? '–' : (LOAD.firstFrame / 1000).toFixed(2) + ' s'} | assets ${LOAD.assets == null ? '–' : (LOAD.assets / 1000).toFixed(2) + ' s'} | DPR ${Math.min(window.devicePixelRatio || 1, 2)}\n`;
+}
 function teleText(S) {
   const T = teleSummary(S);
-  let s = `time ${mmss(S.t)}${speed > 1 ? ' x' + speed : ''} | ${fps} fps | frame work ${frameMs.toFixed(2)} ms (JS + draw submit)\n` + (S.tele.cheats ? 'CHEATS USED: ' + S.tele.cheats.map(c => c.name + ' @' + mmss(c.t)).join(', ') + '\n' : '') + `first lit ${mmss(T.firstLit)} | first upgrade ${mmss(T.firstUpgrade)} (GB1 <= 1:00)\nkeeper#1 ${mmss(T.keeper1)} | tier3 ${mmss(T.tier3)} | tier4 ${mmss(T.tier4)} | tier5 ${mmss(T.tier5)}\nlaunch ${mmss(T.launchAt)} (GB3 22-32 min) | Lit>sell from min ${T.litBeatsSellMin ?? '–'} (GB2 4-7)\nuptime: 3+ keepers ${T.uptimeK3 ?? '–'}% | 0 keepers ${T.uptimeK0 ?? '–'}% | storms ${T.storms}\n\n min   lit$  sell$  up%  tiles moon\n`;
+  let s = perfText() + `${planetDef(S).id} | time ${mmss(S.t)}${speed > 1 ? ' x' + speed : ''} | ${fps} fps | frame work ${frameMs.toFixed(2)} ms (JS + draw submit)\n` + (S.tele.cheats ? 'CHEATS USED: ' + S.tele.cheats.map(c => c.name + ' @' + mmss(c.t)).join(', ') + '\n' : '') + `first lit ${mmss(T.firstLit)} | first upgrade ${mmss(T.firstUpgrade)} (GB1 <= 1:00)\nkeeper#1 ${mmss(T.keeper1)} | tier3 ${mmss(T.tier3)} | tier4 ${mmss(T.tier4)} | tier5 ${mmss(T.tier5)}\nlaunch ${mmss(T.launchAt)} (GB3 22-32 min) | Lit>sell from min ${T.litBeatsSellMin ?? '–'} (GB2 4-7)\nuptime: 3+ keepers ${T.uptimeK3 ?? '–'}% | 0 keepers ${T.uptimeK0 ?? '–'}% | storms ${T.storms}\n\n min   lit$  sell$  up%  tiles moon\n`;
   for (const m of T.minutes.slice(-15)) s += `${String(m.m).padStart(4)} ${String(m.lit).padStart(6)} ${String(m.sell).padStart(6)} ${String(m.up ?? '–').padStart(4)} ${String(m.litTiles ?? '').padStart(6)} ${String(m.moon ?? '').padStart(5)}\n`;
   return s;
 }
@@ -959,20 +1041,85 @@ function benchFrames(n = 120) {
 }
 const selfTestResult = selfTest3d();
 console.log('[selfTest]', selfTestResult);
-Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.defineProperty(SP, 'frameMs', { get: () => frameMs }); Object.assign(SP, { GROUND, stepAlarm, LIT_LOOK, benchFrames, writeTiles, animatePlayer, maskStats, toggleCheat, CHEATS, cheat, updateWorld, drawOverlay, stepPayZones, moneyFlows, ZONES, selfTest3d, renderer, scene, camera, inputVec, CAM });
+Object.defineProperty(SP, 'G', { get: () => G, set: v => { G = v; } }); Object.defineProperty(SP, 'frameMs', { get: () => frameMs }); Object.assign(SP, { saveNow, loadGame, exportEvents, evLog: () => evLog, perfText, LOAD, FTUE, activeFtue, startLaunch, flyToNextPlanet, cineInfo: () => cine, LS, PLANET_LOOK, GROUND, stepAlarm, LIT_LOOK, benchFrames, writeTiles, animatePlayer, maskStats, toggleCheat, CHEATS, cheat, updateWorld, drawOverlay, stepPayZones, moneyFlows, ZONES, selfTest3d, renderer, scene, camera, inputVec, CAM });
 
-let last = performance.now(), teleTimer = 0, logMin = 0, fpsN = 0, fpsT = 0;
-function frame(now) {
-  const t0 = performance.now(), real = Math.min(0.1, (now - last) / 1000); last = now;
-  if (!G.popup) { let rem = real * speed; const inp = inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); stepPayZones(G, d); rem -= d; } }
+// ----- P0-2 creative capture director: 3 hooks x 3 segments of 15 s, each reproducible (fixed seed, scripted state + camera) -----
+// S1 "Toothbrush vs Planet": a = planet zoom-out "Moon 0.00%" into the first strokes, b = tier time-lapse 1 -> 8, c = big Moon zoom-out.
+// S2 "Dark to Lit": a = first tiles light up, b = storm hits a Lit sector (no Keepers), c = same storm, 5 Keepers hold the grid.
+// S3 "Keeper army": a = one Keeper close-up, b = Keepers 1 -> 6, c = rocket launch and Mercury arrival.
+const SEG_SEC = 15, REC_W = 720, REC_H = 1280;
+let recCtx = null, cap = null;
+const capCfg = () => deepMerge(clone(CONFIG), { seed: 1, feel: { zoomOutSec: 6 } });
+const capBot = () => ({ tile: -1, keepers: 0, reclean: 'near', upgradeShare: 0.2, cleanFrac: 0, think: 0, upPick: 'balanced', skipUps: [] });
+function paintLit(S, secs, frac, salt = 7) { // instant, deterministic: light a share of each listed sector (capture setups only)
+  for (const k of secs) S.unlocked[k] = true;
+  for (let i = 0; i < N; i++) if (!KIND[i] && secs.includes(SEC[i]) && hsh(i * 31 + salt) / 4294967296 < frac && S.dirt[i] > 0) { fillTile(S, i, 0); S.dirt[i] = 0; S.ever[i] = 1; S.everCount++; S.litCount++; }
+  S.maskDirty = { x0: 0, y0: 0, x1: S.MW, y1: S.MH }; recalcLinks(S); S.milestone = Math.floor(100 * S.everCount / SWEEPABLE / S.cfg.feel.milestonePct); // no surprise 10% zoom-out
+}
+function capGame(t0 = 0) { const S = startGame({}, capCfg()); S.t = t0; S.storm.next = 1e9; S.tele.firstLit = 1; return S; } // t0 > introSec skips the intro
+const wide = (x, z, d, pitch = 58, yaw = CAM.yawDeg) => { const p = pitch * Math.PI / 180, y = yaw * Math.PI / 180; return { x: x + Math.sin(y) * Math.cos(p) * d, y: Math.sin(p) * d, z: z + Math.cos(y) * Math.cos(p) * d, lx: x, ly: 0, lz: z }; };
+const SEGS = {
+  s1a: { setup: () => capGame(0), tick: (S, t) => { if (t > 10.5 && S.zoomAt < 0) S.zoomAt = S.t; } },
+  s1b: { setup: () => { const S = capGame(6); S.unlocked[1] = true; return S; }, speed: 2, tick: (S, t) => { const k = Math.min(7, Math.floor(t / 1.8)); if (k > S.tool) { S.tool = k; S.tele.tierAt[k] = S.t; } } },
+  s1c: { setup: () => { const S = capGame(6); paintLit(S, [0, 1, 2, 3, 4], 0.72); S.tool = 5; S.player.x = 20; S.player.y = 40; return S; }, tick: (S, t) => { if (t > 4 && S.zoomAt < 0) S.zoomAt = S.t; } },
+  s2a: { setup: () => { const S = capGame(6); S.tool = 1; S.player.x = 12; S.player.y = 60; return S; }, cam: S => wide(S.player.x, S.player.y, 13) },
+  s2b: { setup: () => { const S = capGame(6); paintLit(S, [0, 1], 0.97); S.storm.count = 1; S.crewOpen = true; S.player.x = 12; S.player.y = 62; return S; }, tick: (S, t) => { if (t > 1 && S.storm.next > 1e8) S.storm.next = S.t + S.cfg.storm.warningSec; }, cam: () => wide(34, 60, 34, 62) },
+  s2c: { setup: () => { const S = SEGS.s2b.setup(); for (let k = 0; k < 5; k++) { S.cash += costOf(S, 'keeper'); buy(S, 'keeper'); S.keepers[k].x = 26 + k * 3; S.keepers[k].y = 58; } return S; }, tick: (S, t) => SEGS.s2b.tick(S, t), cam: () => wide(34, 60, 34, 62) },
+  s3a: { setup: () => { const S = capGame(6); paintLit(S, [0, 1], 0.9); S.crewOpen = true; buy(S, 'keeper'); S.storm.count = 1; for (let i = 0; i < N; i++) if (S.ever[i] && SEC[i] === 1 && hsh(i) % 9 === 0) { S.dirt[i] = 0.5; fillTile(S, i, 128); S.litCount--; S.stormed++; S.stormAt[i] = S.t; } S.keepers[0].x = 30; S.keepers[0].y = 60; return S; }, cam: S => { const k = S.keepers[0]; return wide(k.x, k.y, 11, 45); } },
+  s3b: { setup: () => { const S = SEGS.s3a.setup(); paintLit(S, [2, 3], 0.85, 11); return S; }, tick: (S, t) => { if (S.keepers.length < 6 && t > S.keepers.length * 2) { S.cash += costOf(S, 'keeper'); buy(S, 'keeper'); } if (t > 3 && S.storm.next > 1e8) S.storm.next = S.t + 1; }, cam: (S, t) => wide(lerp(24, 26, t / SEG_SEC), lerp(56, 50, t / SEG_SEC), lerp(16, 30, t / SEG_SEC), 60) },
+  s3c: { setup: () => { const S = capGame(6); paintLit(S, [0, 1, 2, 3, 4, 5], 0.74); S.tool = 5; S.fuel = S.cfg.refinery.tankKg; S.player.x = ZONES.launch.c + 1; S.player.y = ZONES.launch.r + 1; return S; }, still: true, tick: (S, t) => { if (t > 1.2 && !S.launches) startLaunch(S); } },
+};
+function stepCapture(real) {
+  if (!cap) return; cap.t += real; const sg = SEGS[cap.id]; if (!cine && sg.tick && G === cap.S) sg.tick(G, cap.t);
+  if (G === cap.S && G.storm.phase === 'warn') G.storm.blowAt = Math.min(G.storm.blowAt, G.t + 2.5); // footage: 2.5 s warning so the storm wall lands inside the 15 s clip
+  speed = sg.speed || 1; capCam = sg.cam && G === cap.S ? sg.cam(G, cap.t) : null;
+  document.getElementById('capT').textContent = cap.id + ' ' + cap.t.toFixed(1) + ' / ' + SEG_SEC + ' s';
+  if (cap.t >= SEG_SEC) endSeg();
+}
+function capInput() { return cap && !SEGS[cap.id].still && G === cap.S ? botMove(G, cap.B) : null; }
+function playSeg(id, record) {
+  endSeg(); cine = null; G = SEGS[id].setup(); camState.init = false; lookPlanet = -1; rocket.position.y = 0;
+  cap = { id, t: 0, S: G, B: capBot() };
+  if (record && window.MediaRecorder) {
+    const cv = document.createElement('canvas'); cv.width = REC_W; cv.height = REC_H; recCtx = cv.getContext('2d');
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'].find(m => MediaRecorder.isTypeSupported(m)) || '';
+    const rec = new MediaRecorder(cv.captureStream(30), mime ? { mimeType: mime, videoBitsPerSecond: 8e6 } : {}), chunks = [];
+    rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+    rec.onstop = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(chunks, { type: rec.mimeType })); a.download = 'stp-' + id + (rec.mimeType.includes('mp4') ? '.mp4' : '.webm'); a.click(); };
+    rec.start(); cap.rec = rec;
+  }
+  buildCapBar();
+}
+function endSeg() { if (!cap) return; if (cap.rec && cap.rec.state !== 'inactive') cap.rec.stop(); recCtx = null; cap = null; capCam = null; speed = 1; buildCapBar(); }
+function buildCapBar() {
+  const el = document.getElementById('cap'); if (!CAPTURE) return; el.style.display = 'flex';
+  el.innerHTML = '<span id="capT">' + (cap ? cap.id : CAPTURE.toUpperCase() + ' ready') + '</span>' + ['a', 'b', 'c'].map(x => { const id = CAPTURE + x; return `<button data-seg="${id}">▶ ${id}</button><button data-rec="${id}" class="rec">● ${id}</button>`; }).join('');
+  el.querySelectorAll('[data-seg]').forEach(b => b.onclick = () => playSeg(b.dataset.seg, false));
+  el.querySelectorAll('[data-rec]').forEach(b => b.onclick = () => playSeg(b.dataset.rec, true));
+}
+if (CAPTURE) { document.getElementById('btnPanel').style.display = 'none'; buildCapBar(); }
+Object.assign(SP, { SEGS, playSeg, endSeg, capInfo: () => cap && { id: cap.id, t: cap.t } });
+
+let last = performance.now(), teleTimer = 0, logMin = 0, fpsN = 0, fpsT = 0, saveT = 0;
+function tick(now) { // one frame (frame() = tick + next rAF; tests call SP.tick while the tab is hidden)
+  const t0 = performance.now(), real = clamp((now - last) / 1000, 0, 0.1);
+  if (LOAD.firstFrame == null) LOAD.firstFrame = t0; else if (now > last) FT[ftN++ % FT.length] = now - last;
+  last = Math.max(last, now); // SP.tick (tests) may run ahead of the rAF clock
+  if (cine && (cine.t += real) >= CINE_SEC) { G.popup = Object.assign({ kind: 'launch' }, cine.info); cine = null; if (CAPTURE) { G.popup = null; flyToNextPlanet(); } }
+  if (G.popup && G.popup.kind === 'offline' && !G.popup.offered) { G.popup.offered = true; ev(G, 'ad_offer', { placement: 'offline_x2', stub: true }); }
+  if (CAPTURE) stepCapture(real);
+  if (!G.popup && !cine) { let rem = real * speed; const inp = CAPTURE ? capInput() : inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); stepPayZones(G, d); rem -= d; } }
   moneyFlows(G, real);
   updateWorld(G, real); renderer.render(scene, camera); drawOverlay(G);
   frameMs += (performance.now() - t0 - frameMs) * 0.05;
   fpsN++; fpsT += real; if (fpsT >= 1) { fps = Math.round(fpsN / fpsT); fpsN = 0; fpsT = 0; }
-  teleTimer += real; if (teleTimer > 0.5 && panel.style.display === 'block') { teleTimer = 0; const el = document.getElementById('tele'); if (el) el.textContent = teleText(G); }
+  if (recCtx) { recCtx.drawImage(glCanvas, 0, 0, REC_W, REC_H); recCtx.drawImage(ui, 0, 0, REC_W, REC_H); }
+  if ((saveT += real) >= 10) { saveT = 0; saveNow(); }
+  teleTimer += real; if (teleTimer > 0.5 && panel.style.display === 'block') { teleTimer = 0; const el = document.getElementById('tele'); if (el) el.textContent = teleText(G); const ei = document.getElementById('evInfo'); if (ei) ei.textContent = `events ${evLog.length} (session ${SESSION}) | last: ${evLog.slice(-4).map(e => e.name).join(', ') || '–'}\nsave: ${((lsGet(LS.save) || '').length / 1024).toFixed(1)} kB, every 10 s + on tab hide | cfg ${cfgHash(CONFIG)}`; }
   if (Math.floor(G.t / 60) > logMin) { logMin = Math.floor(G.t / 60); const m = G.tele.min[logMin - 1]; if (m) console.log('[tele]', JSON.stringify({ m: logMin, lit: Math.round(m.lit), sell: Math.round(m.sell), litTiles: G.litCount })); }
-  requestAnimationFrame(frame);
 }
+function frame(now) { tick(now); requestAnimationFrame(frame); }
+SP.tick = (n = 1, ms = 1000 / 60) => { for (let i = 0; i < n; i++) tick(last + ms); };
 requestAnimationFrame(frame);
 </script>
 </body>

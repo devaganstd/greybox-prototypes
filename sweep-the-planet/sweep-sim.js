@@ -38,11 +38,16 @@ const CONFIG = {
     payout: { base: 100, growth: 1.17, step: 0.5, decay: 0.08, max: 8 },       // +50%, +42%, +34%, ... = +176% at Lv 8
     panelBoost: { base: 70, growth: 1.17, step: 0.5, decay: 0.08, max: 8 },    // as Payout, on Lit $/s
   },
-  storm: { intervalSec: 90, warningSec: 8, litFraction: 0.10, dirtAfter: 0.5, firstStormAtSec: 130, firstStormTiles: 6, bandRows: 16, frontSec: 4, samples: 4 },
-  keeper: { cost: [0, 150, 600, 2000, 6000, 15000], max: 6, secPerPass: 0.5, speed: 3.0, passPower: 0.5 }, // secPerPass tuned (concept 1.5: 3 Keepers held only 85%)
+  // P0-1 (Greybox+): storms hit sectors the player is not in (litFraction 0.15); a storm tile left dirty for hardenSec hardens to
+  // hardenDirt (+1 Keeper pass, darker), so Keepers matter during active play, not only offline. Tuned 2026-11-22 (bot): interval 90 -> 50 s,
+  // bandRows 16 -> 32 = active bot uptime 84% without Keepers, 93% with 3; Keeper speed 3 -> 5, secPerPass 0.5 -> 0.35.
+  storm: { intervalSec: 50, warningSec: 8, litFraction: 0.15, dirtAfter: 0.5, firstStormAtSec: 130, firstStormTiles: 6, bandRows: 32, frontSec: 4, samples: 4, hardenSec: 45, hardenDirt: 1.0, dustValue: 0.25 }, // dustValue: storm dust (on tiles Lit before) sells at this share: fine fallout, not fresh regolith, so storms cost more than they pay
+  keeper: { cost: [0, 150, 600, 2000, 6000, 15000], max: 6, secPerPass: 0.35, speed: 5.0, passPower: 0.5, dustPay: 1.0 }, // dustPay (P0-1): a Keeper's swept dust is sold at this share of the sell price (no Fuel), so hiring never loses the storm dust a player would have swept; // secPerPass tuned (concept 1.5: 3 Keepers held only 85%)
   hauler: { cost: [500, 3000, 12000], radius: 3 }, // G9 optional: not built in this greybox
   refinery: { defaultFuelShare: 0.3, tankKg: 150, launchMinLit: 0.7 },
   launch: { stardustPerLitPct: 0.1 },
+  // P0-3: planet 2 = Mercury teaser (same base layout, only sectors 1-2 open; Heat Dust is P1-2). The 3D layer owns the palette.
+  planets: [{ id: 'Moon', sectors: 6 }, { id: 'Mercury', sectors: 2 }],
   offline: { capMin: 120, noKeeperUptime: 0.4, keeperTravelFactor: 0.5 },
   ads: { firstAdMinSec: 240 }, // no ads in greybox; kept for reference
   // dwellSec: every pad / pay zone / panel fires only after the player stands on it this long (stepping off resets; walking through
@@ -133,7 +138,10 @@ const toolWidth = S => toolDef(S).width + upBonus(S, 'width');
 const playerSpeed = S => S.cfg.player.speed * toolDef(S).speedMult * (1 + upBonus(S, 'speed') * (toolDef(S).speedUpScale ?? 1));
 const payoutMult = S => 1 + upBonus(S, 'payout');
 const panelMult = S => 1 + upBonus(S, 'panelBoost');
-const nextGate = S => S.unlocked.indexOf(false);
+const planetDef = S => (S.cfg.planets || [])[S.planet] || { id: 'Moon', sectors: 6 };
+const nextGate = S => { const g = S.unlocked.indexOf(false); return g >= planetDef(S).sectors ? -1 : g; };
+// analytics (P0-5): S.evFn(name, props) is set by the 3D page; headless bots have none. Schema: README "Analytics event log".
+const ev = (S, name, props) => { if (S.evFn) S.evFn(name, Object.assign({ t: +S.t.toFixed(2), planet: planetDef(S).id }, props)); };
 const gateCost = (S, k) => S.cfg.grid.sectorGateCost[k];
 const canLaunch = S => S.fuel >= S.cfg.refinery.tankKg - 1e-9 && S.litCount >= S.cfg.refinery.launchMinLit * SWEEPABLE;
 function costOf(S, id) {
@@ -146,16 +154,16 @@ function costOf(S, id) {
 const canBuy = (S, id) => { const c = costOf(S, id); return c != null && S.cash >= c; };
 function buy(S, id) {
   if (!canBuy(S, id)) return false;
-  S.cash -= costOf(S, id); S.spent++;
+  const cost = costOf(S, id); S.cash -= cost; S.spent++;
   if (S.tele.firstUpgrade == null) S.tele.firstUpgrade = S.t;
-  if (UPS.includes(id)) S.up[id]++;
-  else if (id === 'tool') { S.tool++; S.tele.tierAt[S.tool] = S.t; fxConfetti(S); sfx(S, 'tool'); }
-  else if (id === 'keeper') { S.keepers.push({ x: DEPOT_C.x, y: DEPOT.r - 0.6, target: -1, work: 0, sector: -1, id: S.keepers.length }); S.tele.keeperAt[S.keepers.length] = S.t; sfx(S, 'keeper'); }
+  if (UPS.includes(id)) { S.up[id]++; ev(S, 'upgrade_buy', { id, lv: S.up[id], cost }); }
+  else if (id === 'tool') { S.tool++; S.tele.tierAt[S.tool] = S.t; fxConfetti(S); sfx(S, 'tool'); ev(S, 'tool_buy', { tier: S.tool + 1, id: toolDef(S).id, cost }); }
+  else if (id === 'keeper') { S.keepers.push({ x: DEPOT_C.x, y: DEPOT.r - 0.6, target: -1, work: 0, sector: -1, id: S.keepers.length }); S.tele.keeperAt[S.keepers.length] = S.t; sfx(S, 'keeper'); ev(S, 'keeper_hire', { n: S.keepers.length, cost }); }
   return true;
 }
 function unlockGate(S, k) {
   if (k <= 0 || S.cash < gateCost(S, k)) return false;
-  S.cash -= gateCost(S, k); S.unlocked[k] = true; S.tele.gateAt[k] = S.t; sfx(S, 'gate');
+  S.cash -= gateCost(S, k); S.unlocked[k] = true; S.tele.gateAt[k] = S.t; sfx(S, 'gate'); ev(S, 'gate_open', { sector: k + 1, cost: gateCost(S, k) });
   addText(S, PADS[k].c + 1, PADS[k].r, 'Sector ' + (k + 1) + ' open!', '#FFD45E');
   return true;
 }
@@ -171,7 +179,7 @@ function sell(S) {
 }
 function launch(S) {
   const litPct = 100 * S.litCount / SWEEPABLE, sd = Math.floor(litPct * S.cfg.launch.stardustPerLitPct);
-  S.stardust += sd; S.launches++; if (S.tele.launchAt == null) S.tele.launchAt = S.t;
+  S.stardust += sd; S.launches++; if (S.tele.launchAt == null) S.tele.launchAt = S.t; ev(S, 'launch', { litPct: +litPct.toFixed(2), stardust: sd, tier: S.tool + 1 });
   return { stardust: sd, litPct, t: S.t };
 }
 function skipOffline(S, minutes) {
@@ -185,10 +193,10 @@ function skipOffline(S, minutes) {
 // ===== state =====
 function newGame(cfg, keep = {}) {
   const S = {
-    cfg, t: 0, rng: mulberry32((keep.seed ?? cfg.seed) * 9973 + 1), headless: !!keep.headless,
+    cfg, t: 0, rs: ((keep.seed ?? cfg.seed) * 9973 + 1) | 0, headless: !!keep.headless, planet: keep.planet || 0,
     cash: 0, earned: 0, spent: 0, can: 0, fuel: 0, fuelShare: cfg.refinery.defaultFuelShare, stardust: keep.stardust || 0, launches: keep.launches || 0,
     tool: keep.tool || 0, up: { capacity: 0, width: 0, speed: 0, payout: 0, panelBoost: 0 },
-    dirt: new Float32Array(N), ever: new Uint8Array(N), foot: new Int32Array(N), footId: 1, popAt: new Float32Array(N).fill(-9), shineUntil: new Float32Array(N), stormAt: new Float32Array(N).fill(-9),
+    dirt: new Float32Array(N), ever: new Uint8Array(N), hard: new Uint8Array(N), hardT: 0, stormOpen: false, foot: new Int32Array(N), footId: 1, popAt: new Float32Array(N).fill(-9), shineUntil: new Float32Array(N), stormAt: new Float32Array(N).fill(-9),
     linked: new Uint8Array(N), dist: new Int16Array(N), par: new Int32Array(N).fill(-1), q: new Int32Array(N),
     unlocked: [true, false, false, false, false, false], payFlow: false, gatePaid: 0, litCount: 0, everCount: 0, stormed: 0, linkedCount: 0, rate: 0, linkT: 0,
     player: { x: DEPOT.c + DEPOT.w + 1.5, y: DEPOT.r + 2, tc: -1, tr: -1, face: -Math.PI / 2, moving: false },
@@ -197,6 +205,8 @@ function newGame(cfg, keep = {}) {
     tele: { firstUpgrade: null, firstLit: null, firstSell: null, tierAt: {}, keeperAt: {}, gateAt: {}, launchAt: null, min: [], upK3: [0, 0], upK0: [0, 0], storms: 0 },
     ftue: { done: {}, shownAt: {} },
   };
+  S.rng = () => { const a = S.rs = (S.rs + 0x6D2B79F5) | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; // mulberry32 with its state on S (saveable)
+  S.sweepable = 0; for (let i = 0; i < N; i++) if (!KIND[i] && SEC[i] < planetDef(S).sectors) S.sweepable++;
   for (let i = 0; i < N; i++) S.dirt[i] = KIND[i] ? 0 : 1;
   const SUB = S.SUB = cfg.dust.sub; S.MW = C * SUB; S.MH = R * SUB; S.sub = new Uint8Array(S.MW * S.MH); S.subStamp = new Int32Array(S.MW * S.MH); S.stampId = 1; S.lastHead = null;
   for (let i = 0; i < N; i++) if (!KIND[i]) fillTile(S, i, 255);
@@ -221,10 +231,10 @@ const sfx = (S, kind, n) => { if (S.sfxFn) S.sfxFn(kind, n); };
 
 function onLit(S, i, byKeeper) {
   if (!S.ever[i]) { S.ever[i] = 1; S.everCount++; } else S.stormed--;
-  S.litCount++; S.popAt[i] = S.t;
+  S.litCount++; S.popAt[i] = S.t; S.hard[i] = 0;
   const td = toolDef(S); if (td.shineSec && !byKeeper) S.shineUntil[i] = S.t + td.shineSec;
   S.chain = S.t - S.lastLitT < S.cfg.feel.toneWindowSec ? Math.min(S.chain + 1, S.cfg.feel.toneMax - 1) : 0; S.lastLitT = S.t;
-  if (S.tele.firstLit == null) S.tele.firstLit = S.t;
+  if (S.tele.firstLit == null) { S.tele.firstLit = S.t; ev(S, 'first_lit', {}); }
   if (!S.headless) {
     if (S.t - S.lastTone > 0.06) { S.lastTone = S.t; sfx(S, 'lit', S.chain); }
     if (S.litCount <= 10 || S.litCount % 40 === 0) addText(S, i % C + 0.5, ((i / C) | 0), '+$' + (S.cfg.lit.powerPerTile * S.cfg.lit.gridLinkMult * panelMult(S)).toFixed(2) + '/s', '#3EE6FF');
@@ -242,7 +252,7 @@ function refreshTile(S, i, collect) {
   if (S.dirt[i] === 0) return;
   const SUB = S.SUB, n = SUB * SUB, c = i % C, r = (i / C) | 0; let sum = 0, clean = 0;
   for (let y = 0; y < SUB; y++) { const o = (r * SUB + y) * S.MW + c * SUB; for (let x = 0; x < SUB; x++) { const v = S.sub[o + x]; sum += v; if (v === 0) clean++; } }
-  if (clean >= S.cfg.dust.litCleanFrac * n) { if (collect) addKg(S, sum); fillTile(S, i, 0); S.dirt[i] = 0; onLit(S, i, !collect); }
+  if (clean >= S.cfg.dust.litCleanFrac * n) { if (collect) addKg(S, S.ever[i] ? sum * S.cfg.storm.dustValue : sum); fillTile(S, i, 0); S.dirt[i] = 0; onLit(S, i, !collect); }
   else S.dirt[i] = sum / (255 * n);
 }
 function passTile(S, i, amt, collect) { // one pass over the whole tile (Keepers, tests)
@@ -250,7 +260,7 @@ function passTile(S, i, amt, collect) { // one pass over the whole tile (Keepers
   if (collect && capKg(S) - S.can <= 1e-9) { S.blocked = S.t; return 0; }
   const SUB = S.SUB, c = i % C, r = (i / C) | 0, lv = Math.round(255 * amt), before = S.dirt[i]; let got = 0;
   for (let y = 0; y < SUB; y++) { const o = (r * SUB + y) * S.MW + c * SUB; for (let x = 0; x < SUB; x++) { const v = S.sub[o + x], d = Math.min(v, lv); S.sub[o + x] = v - d; got += d; } }
-  if (collect) addKg(S, got);
+  if (collect) addKg(S, S.ever[i] ? got * S.cfg.storm.dustValue : got);
   markMask(S, c * SUB, r * SUB, c * SUB + SUB, r * SUB + SUB); refreshTile(S, i, collect);
   return before - S.dirt[i];
 }
@@ -283,9 +293,9 @@ function brushStamp(S, ax, ay, bx, by) {
     S.subStamp[idx] = id; S.foot[i] = fid;
     if (prev === id - 1 || KIND[i] || !S.unlocked[SEC[i]] || S.dirt[i] === 0) continue;
     const v = S.sub[idx]; if (!v) continue;
-    const d = Math.min(v, lv); S.sub[idx] = v - d; got += d; touched.add(i);
+    const d = Math.min(v, lv); S.sub[idx] = v - d; got += S.ever[i] ? d * S.cfg.storm.dustValue : d; touched.add(i);
   }
-  if (!got) return;
+  if (!touched.size) return; // storm dust may be worth 0 kg but its tiles still relight
   addKg(S, got); markMask(S, x0, y0, x1, y1);
   for (const i of touched) refreshTile(S, i, true);
 }
@@ -332,18 +342,21 @@ function stepStorm(S, dt) {
   const st = S.storm, cfg = S.cfg.storm;
   if (st.phase === 'idle' && S.t >= st.next - cfg.warningSec) {
     if (S.litCount < 4) { st.next += 10; return; }
-    const lits = []; for (let i = 0; i < N; i++) if (!KIND[i] && S.dirt[i] === 0 && S.ever[i]) lits.push(i);
+    const ps = SEC[Math.floor(S.player.y) * C + Math.floor(S.player.x)], away = i => SEC[i] !== ps;
+    let lits = []; for (let i = 0; i < N; i++) if (!KIND[i] && S.dirt[i] === 0 && S.ever[i]) lits.push(i);
+    if (lits.some(away)) { lits = lits.filter(away); st.skip = ps; } else st.skip = -1; // only the player's sector is Lit (early game): hit it
     let row = -1, far = -1; // band centred on the farthest of `samples` random Lit tiles: storms hit where the player is not
     for (let k = 0; k < Math.max(1, cfg.samples || 1); k++) { const i = lits[Math.floor(S.rng() * lits.length)], d = Math.abs(((i / C) | 0) - S.player.y); if (d > far) { far = d; row = (i / C) | 0; } }
     st.r0 = clamp(row - (cfg.bandRows >> 1), 0, R - cfg.bandRows); st.dir = S.rng() < 0.5 ? 1 : -1; st.phase = 'warn'; st.blowAt = st.next;
     sfx(S, 'warn');
   }
   if (st.phase === 'warn' && S.t >= st.blowAt) {
-    const band = []; for (let r = st.r0; r < st.r0 + cfg.bandRows; r++) for (let c = 0; c < C; c++) { const i = r * C + c; if (!KIND[i] && S.dirt[i] === 0 && S.ever[i]) band.push(i); }
+    const band = []; for (let r = st.r0; r < st.r0 + cfg.bandRows; r++) for (let c = 0; c < C; c++) { const i = r * C + c; if (!KIND[i] && S.dirt[i] === 0 && S.ever[i] && SEC[i] !== st.skip) band.push(i); }
     for (let k = band.length - 1; k > 0; k--) { const j = Math.floor(S.rng() * (k + 1)); [band[k], band[j]] = [band[j], band[k]]; }
     const n = st.count === 0 ? cfg.firstStormTiles : Math.round(cfg.litFraction * S.litCount);
     st.targets = band.slice(0, n).sort((a, b) => st.dir * (a % C - b % C)); st.ti = 0;
-    st.front = st.dir > 0 ? -2 : C + 2; st.phase = 'blow';
+    st.front = st.dir > 0 ? -2 : C + 2; st.phase = 'blow'; st.hitAt = S.t; S.stormOpen = st.targets.length > 0;
+    ev(S, 'storm_hit', { n: st.targets.length, storm: st.count + 1 });
   }
   if (st.phase === 'blow') {
     st.front += st.dir * (C + 4) / cfg.frontSec * dt;
@@ -355,6 +368,12 @@ function stepStorm(S, dt) {
       st.phase = 'idle'; st.count++; S.tele.storms++; st.next = st.blowAt + cfg.intervalSec; S.crewOpen = true;
     }
   }
+}
+// P0-1: a storm tile still dirty hardenSec after the hit hardens once: its cells refill to hardenDirt (darker, +1 Keeper pass)
+function stepHarden(S, dt) {
+  if ((S.hardT += dt) < 0.5) return; S.hardT = 0;
+  const cfg = S.cfg.storm, lv = Math.round(255 * cfg.hardenDirt);
+  for (let i = 0; i < N; i++) if (S.ever[i] && !S.hard[i] && S.dirt[i] > 0 && S.stormAt[i] > 0 && S.t - S.stormAt[i] >= cfg.hardenSec) { S.hard[i] = 1; S.dirt[i] = cfg.hardenDirt; fillTile(S, i, lv); }
 }
 function pickKeeperTarget(S, k) {
   const claimed = new Set(S.keepers.filter(o => o !== k && o.target >= 0).map(o => o.target)), per = [0, 0, 0, 0, 0, 0];
@@ -377,7 +396,7 @@ function stepKeepers(S, dt) {
       const ox = k.x, oy = k.y; k.x += dx / d * s; k.y += dy / d * s; k.working = false;
       if (pushOut(k, 0.35) && Math.hypot(k.x - ox, k.y - oy) < s * 0.3) { const sg = k.id % 2 ? 1 : -1; k.x = ox - dy / d * s * sg; k.y = oy + dx / d * s * sg; pushOut(k, 0.35); } // head-on into a wall: slide sideways
     }
-    else { k.x = tx; k.y = ty; if (k.target >= 0) { k.working = true; k.work += dt; if (k.work >= kc.secPerPass) { k.work = 0; passTile(S, k.target, kc.passPower, false); } } }
+    else { k.x = tx; k.y = ty; if (k.target >= 0) { k.working = true; k.work += dt; if (k.work >= kc.secPerPass) { k.work = 0; const cash = passTile(S, k.target, kc.passPower, false) * S.cfg.storm.dustValue * S.cfg.dust.kgPerTile * S.cfg.dust.pricePerKg * payoutMult(S) * (kc.dustPay || 0); S.cash += cash; S.earned += cash; bin(S).sell += cash; } } }
   }
 }
 // dwell-to-trigger: true once the player has stood on `key` for `need` s; stepping off resets. S.ringP = progress for the foot ring.
@@ -404,7 +423,8 @@ function step(S, dt, input) {
   }
   const b = bin(S), inc = S.rate * dt; S.cash += inc; S.earned += inc; b.lit += inc;
   if ((S.linkT -= dt) <= 0) { S.linkT = S.cfg.lit.linkRecalcSec; recalcLinks(S); }
-  stepStorm(S, dt); stepKeepers(S, dt);
+  stepStorm(S, dt); stepKeepers(S, dt); stepHarden(S, dt);
+  if (S.stormOpen && S.stormed === 0) { S.stormOpen = false; ev(S, 'storm_cleared', { sec: +(S.t - S.storm.hitAt).toFixed(1) }); }
   if (S.everCount > 0) {
     const up = S.litCount / S.everCount; b.up += up * dt; b.w += dt;
     if (S.storm.count > 0) { const u = S.keepers.length >= 3 ? S.tele.upK3 : S.keepers.length === 0 ? S.tele.upK0 : null; if (u) { u[0] += up * dt; u[1] += dt; } }
@@ -413,6 +433,43 @@ function step(S, dt, input) {
     for (const f of S.fx) { f.life -= dt; if (f.type === 'dot') { f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= 0.94; f.vy *= 0.94; } else f.y -= 1.2 * dt; }
     S.fx = S.fx.filter(f => f.life > 0);
   }
+}
+
+// Analytics schema (P0-5) = the Unity SDK contract. Every event: name, ts (epoch ms), session (id per page load), t (sim seconds),
+// planet (Moon / Mercury) + the props listed here. funnel.js validates exports against this and computes the playtest funnel.
+const EVENT_SCHEMA = {
+  session_start: ['resumed', 'cfg'], session_end: ['dur'], ftue_step: ['step', 'id', 'waitSec'], first_lit: [],
+  upgrade_buy: ['id', 'lv', 'cost'], tool_buy: ['tier', 'id', 'cost'], keeper_hire: ['n', 'cost'], gate_open: ['sector', 'cost'],
+  storm_hit: ['n', 'storm'], storm_cleared: ['sec'], launch: ['litPct', 'stardust', 'tier'], planet_enter: ['to', 'tool', 'stardust'],
+  ad_offer: ['placement', 'stub'], ad_accept: ['placement', 'stub'],
+};
+// ===== session save (P0-6) =====
+// Full sim state as plain JSON: scalars + run-length encoded typed arrays ([value, count, ...]; the fine dust mask is mostly long runs).
+// cfgHash = hash of the CONFIG the state was made with: a different CONFIG (tuning changed) refuses the save, the page resets with a warning.
+// Not saved: visual-only fields (fx, popAt, popup, dist/par of the Grid Link animation; rebuilt within linkRecalcSec).
+const SAVE_VER = 1;
+function cfgHash(cfg) { const s = JSON.stringify(cfg); let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(16); }
+function rle(a) { const o = []; for (let i = 0; i < a.length;) { const v = a[i]; let n = 1; while (i + n < a.length && a[i + n] === v) n++; o.push(v, n); i += n; } return o; }
+function unrle(o, a) { let k = 0; for (let j = 0; j < o.length; j += 2) { a.fill(o[j], k, k + o[j + 1]); k += o[j + 1]; } if (k !== a.length) throw new Error('save: bad array length'); return a; }
+const SAVE_ARR = ['dirt', 'ever', 'hard', 'shineUntil', 'stormAt', 'linked', 'sub'];
+const SAVE_KEYS = ['t', 'rs', 'planet', 'cash', 'earned', 'spent', 'can', 'fuel', 'fuelShare', 'stardust', 'launches', 'tool', 'up', 'unlocked', 'gatePaid', 'litCount', 'everCount', 'stormed', 'linkedCount', 'rate', 'linkT', 'hardT', 'stormOpen',
+  'player', 'keepers', 'crewOpen', 'storm', 'chain', 'lastLitT', 'lastTone', 'blocked', 'milestone', 'zoomAt', 'tele', 'ftue', 'dw', 'dumpT', 'lastHead', 'footId', 'stampId', 'zonePaid', 'ringP'];
+function serialize(S) {
+  const o = { v: SAVE_VER, cfgHash: cfgHash(S.cfg), savedAt: Date.now(), s: {}, a: {} };
+  for (const k of SAVE_KEYS) if (S[k] !== undefined) o.s[k] = S[k];
+  for (const k of SAVE_ARR) o.a[k] = rle(S[k]);
+  const last = (arr, id) => { const l = []; for (let i = 0; i < arr.length; i++) if (arr[i] === id) l.push(i); return l; }; // only the last stamp matters to the brush / bot
+  o.a.foot = last(S.foot, S.footId); o.a.stamp = last(S.subStamp, S.stampId);
+  return JSON.parse(JSON.stringify(o));
+}
+function deserialize(cfg, o, keep = {}) { // null when the save is from another SAVE_VER / CONFIG
+  if (!o || o.v !== SAVE_VER || o.cfgHash !== cfgHash(cfg)) return null;
+  const S = newGame(cfg, Object.assign({}, keep, { planet: o.s.planet }));
+  for (const k of SAVE_KEYS) if (o.s[k] !== undefined) S[k] = clone(o.s[k]);
+  for (const k of SAVE_ARR) unrle(o.a[k], S[k]);
+  for (const i of o.a.foot) S.foot[i] = S.footId; for (const i of o.a.stamp) S.subStamp[i] = S.stampId;
+  S.maskDirty = { x0: 0, y0: 0, x1: S.MW, y1: S.MH };
+  return S;
 }
 
 // ===== bot (headless) =====
@@ -489,9 +546,9 @@ function botBuy(S, B) {
   }
   return null;
 }
-function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true, upPick = 'balanced', skipUps = [] } = {}) {
+function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true, upPick = 'balanced', skipUps = [], evFn = null } = {}) {
   const cfg = deepMerge(clone(CONFIG), overrides); cfg.seed = seed;
-  const S = newGame(cfg, { headless: true, seed });
+  const S = newGame(cfg, { headless: true, seed }); S.evFn = evFn; // evFn: collect analytics events from a bot run (funnel.js regression)
   const B = { tile: -1, keepers, reclean, upgradeShare, cleanFrac: 0, noDirty: false, think: 0, upPick, skipUps };
   let launchInfo = null, idleUp = [0, 0];
   while (S.t < minutes * 60) {
@@ -615,9 +672,34 @@ function selfTest() {
   // launch resets planet but keeps tool + stardust
   T.tool = 3; T.fuel = CONFIG.refinery.tankKg; const r = launch(T); const U = newGame(clone(CONFIG), { tool: T.tool, stardust: T.stardust, headless: true });
   out.launchKeepsTool = U.tool === 3 && U.cash === 0 && U.litCount === 0 && U.stardust === r.stardust;
+  // P0-1 stormHarden: storms skip the player's sector once another sector is Lit; a storm tile left 45 s hardens (darker, Keeper needs 2 passes)
+  const Hd = newGame(clone(CONFIG), { headless: true }); Hd.unlocked[1] = true;
+  for (const i of [60 * C + 10, 60 * C + 11, 60 * C + 30, 60 * C + 31, 61 * C + 30]) passTile(Hd, i, 1, false);
+  Hd.player.x = 10.5; Hd.player.y = 60.5; Hd.storm.next = Hd.t + Hd.cfg.storm.warningSec; Hd.storm.count = 1; Hd.storm.r0 = 50;
+  for (let k = 0; k < 400 && Hd.storm.phase !== 'idle' || k < 2; k++) step(Hd, 0.05, null);
+  const own = [60 * C + 10, 60 * C + 11].every(i => Hd.dirt[i] === 0), hitT = [60 * C + 30, 60 * C + 31, 61 * C + 30].filter(i => Hd.dirt[i] > 0);
+  const hi = hitT[0], softDirt = hi != null && Hd.dirt[hi], softHard = hi != null && Hd.hard[hi];
+  for (let k = 0; k < 20 * (Hd.cfg.storm.hardenSec + 1); k++) step(Hd, 0.05, null);
+  const hardOk = hi != null && Hd.hard[hi] === 1 && Hd.dirt[hi] === Hd.cfg.storm.hardenDirt && Hd.sub[(((hi / C) | 0) * Hd.SUB) * Hd.MW + (hi % C) * Hd.SUB] === 255;
+  passTile(Hd, hi, Hd.cfg.keeper.passPower, false); const onePass = Hd.dirt[hi] > 0; passTile(Hd, hi, Hd.cfg.keeper.passPower, false);
+  out.stormHarden = own && hitT.length > 0 && softDirt === Hd.cfg.storm.dirtAfter && !softHard && hardOk && onePass && Hd.dirt[hi] === 0 && Hd.hard[hi] === 0;
+  // P0-6 saveRoundtrip: save mid-run, load, save again = identical; both copies then step identically (bit for bit) for 30 s
+  const Sa = newGame(clone(CONFIG), { headless: true, seed: 3 }), Ba = { tile: -1, keepers: 3, reclean: 'near', upgradeShare: 0.2, cleanFrac: 0, think: 0, upPick: 'balanced' };
+  const run = (X, Bx, n) => { for (let k = 0; k < n; k++) { step(X, 0.05, botMove(X, Bx)); if ((Bx.think -= 0.05) <= 0) { Bx.think = 1; botBuy(X, Bx); } } };
+  const ser = X => JSON.stringify(Object.assign(serialize(X), { savedAt: 0 }));
+  run(Sa, Ba, 20 * 200); const s1 = ser(Sa), Sb = deserialize(clone(CONFIG), JSON.parse(s1), { headless: true }), Bb = clone(Ba);
+  const same = Sb && ser(Sb) === s1; if (Sb) { run(Sa, Ba, 600); run(Sb, Bb, 600); }
+  const eqArr = k => Sa[k].length === Sb[k].length && Sa[k].every((v, i) => Object.is(v, Sb[k][i]));
+  out.saveRoundtrip = !!same && ser(Sa) === ser(Sb) && ['sub', 'dirt', 'shineUntil', 'stormAt'].every(eqArr) && Sa.storm.count >= 1
+    && deserialize(deepMerge(clone(CONFIG), { dust: { pricePerKg: 9 } }), JSON.parse(s1)) === null;
+  // P0-3 launchToPlanet2: Launch carries tool + Stardust into Mercury (planet 2: only sectors 1-2 have gates, fresh dust)
+  const Mo = newGame(clone(CONFIG), { headless: true }); Mo.tool = 4; Mo.stardust = 3; const lr = launch(Mo);
+  const Me = newGame(clone(CONFIG), { headless: true, planet: Mo.planet + 1, tool: Mo.tool, stardust: Mo.stardust, launches: Mo.launches });
+  Me.cash = 1e9; Me.unlocked[1] = true;
+  out.launchToPlanet2 = planetDef(Me).id === 'Mercury' && Me.tool === 4 && Me.stardust === 3 + lr.stardust && Me.launches === 1 && Me.litCount === 0 && nextGate(Me) === -1 && Me.sweepable > 0 && Me.sweepable < SWEEPABLE / 2;
   for (const [k, v] of Object.entries(out)) console.assert(v, 'selfTest failed: ' + k);
   out.pass = Object.values(out).every(v => v === true);
   return out;
 }
-globalThis.SP = { upBonus, playerSpeed, UPS, PLAZA, dwell, SELL, headPos, blocked, PADZ, BLDG, ROCKS, SOLIDS, KIND, SWEEPABLE, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
+globalThis.SP = { EVENT_SCHEMA, serialize, deserialize, cfgHash, planetDef, nextGate, stepHarden, upBonus, playerSpeed, UPS, PLAZA, dwell, SELL, headPos, blocked, PADZ, BLDG, ROCKS, SOLIDS, KIND, SWEEPABLE, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
 

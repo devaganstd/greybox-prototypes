@@ -36,7 +36,7 @@
 <div id="err"></div>
 <div id="cap"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=sell2"></script>
+<script src="sweep-sim.js?v=vac1"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -365,6 +365,7 @@ function buildTool(tier, w, reach) {
   else { const arm = new THREE.Mesh(new THREE.BoxGeometry(hx - 0.3, 0.08, 0.16), lam(0x4a4560)); arm.position.set(0.3 + (hx - 0.3) / 2, 0.22, 0); g.add(arm); } // machines: a strut to the sweep head
   if (ASSETS) { // head from the GLB (unit width, scaled across the facing); machine tiers add their body (walk-behind or ride-on)
     const head = ASSETS.clone('tool' + tier); head.position.x = hx; head.scale.z = hw; g.add(head);
+    if (tier < 4 && ASSETS.has('veh' + tier)) { const v = addOutline(ASSETS.clone('veh' + tier)), t = 0.45; v.position.set(hx + (ax - hx) * t, hy + (ay - hy) * t + 0.05, 0); v.rotation.z = Math.atan2(hx - ax, ay - hy); g.add(v); } // upright vacuum body on the handle
     if (tier >= 4) { const v = addOutline(ASSETS.clone('veh' + tier)); v.position.x = ride ? 0.05 : hx - 0.55; g.add(v); g.userData.veh = v; }
     return g;
   }
@@ -414,7 +415,7 @@ function useAssets(gltf) {
   SP.assets = 'glb';
 }
 SP.assets = 'loading';
-new GLTFLoader().load('assets/sweep-assets.glb?v=pass4', g => { useAssets(g); LOAD.assets = performance.now(); }, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+new GLTFLoader().load('assets/sweep-assets.glb?v=vac1', g => { useAssets(g); LOAD.assets = performance.now(); }, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
 // code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
 const anim = { squash: 0, lastCan: 0, sweepT: 0, tierPop: 0, lastTool: 0 };
 function animatePlayer(S, p, dt) {
@@ -438,10 +439,14 @@ puffGeo.setAttribute('position', new THREE.BufferAttribute(puffPos, 3));
 const puffPts = new THREE.Points(puffGeo, new THREE.PointsMaterial({ map: softTex([[0, 1], [0.5, 0.6], [1, 0]]), color: 0xc3bbd0, size: 0.3, transparent: true, opacity: 0.9, depthWrite: false })); puffPts.frustumCulled = false; scene.add(puffPts);
 function stepPuffs(S, dt) {
   const p = S.player;
-  if (anim.sweepT > 0 && p.moving && !S.headless) { const hp = headPos(S); for (let k = 0; k < 3 && puffs.length < PUFF_MAX; k++) { const suck = Math.random() < 0.4; puffs.push({ x: hp.x + (Math.random() - 0.5) * 0.6, y: 0.08, z: hp.y + (Math.random() - 0.5) * 0.6, vx: (Math.random() - 0.5) * 1.4, vy: 0.6 + Math.random() * 1.2, vz: (Math.random() - 0.5) * 1.4, life: suck ? 0.4 : 0.45 + Math.random() * 0.3, t: 0, suck }); } }
+  const vac = toolDef(S).vac;
+  if (vac && anim.sweepT > 0 && p.moving && !S.headless) { const hp = headPos(S), fx = Math.cos(p.face), fz = Math.sin(p.face), w = toolWidth(S); // vacuum: light dust pulled from just ahead into the nozzle
+    for (let k = 0; k < 3 && puffs.length < PUFF_MAX; k++) { const o = (Math.random() - 0.5) * w, a = 0.35 + Math.random() * 0.45; puffs.push({ x: hp.x + fx * a - fz * o, y: 0.06, z: hp.y + fz * a + fx * o, vx: 0, vy: 0, vz: 0, life: 0.32, t: 0, suck: false, tx: hp.x - fz * o * 0.6, tz: hp.y + fx * o * 0.6 }); } }
+  else if (anim.sweepT > 0 && p.moving && !S.headless) { const hp = headPos(S); for (let k = 0; k < 3 && puffs.length < PUFF_MAX; k++) { const suck = Math.random() < 0.4; puffs.push({ x: hp.x + (Math.random() - 0.5) * 0.6, y: 0.08, z: hp.y + (Math.random() - 0.5) * 0.6, vx: (Math.random() - 0.5) * 1.4, vy: 0.6 + Math.random() * 1.2, vz: (Math.random() - 0.5) * 1.4, life: suck ? 0.4 : 0.45 + Math.random() * 0.3, t: 0, suck }); } }
   const bx = p.x - Math.cos(p.face) * 0.45, bz = p.y - Math.sin(p.face) * 0.45;
   for (let i = puffs.length - 1; i >= 0; i--) { const f = puffs[i]; f.t += dt; if (f.t >= f.life) { puffs.splice(i, 1); continue; }
-    if (f.suck && f.t > 0.12) { const k = Math.min(1, dt * 10); f.x += (bx - f.x) * k; f.y += (0.8 - f.y) * k; f.z += (bz - f.z) * k; }
+    if (f.tx != null) { const k = Math.min(1, dt * (4 + f.t * 30)); f.x += (f.tx - f.x) * k; f.y += (0.1 - f.y) * k + dt * 0.3; f.z += (f.tz - f.z) * k; }
+    else if (f.suck && f.t > 0.12) { const k = Math.min(1, dt * 10); f.x += (bx - f.x) * k; f.y += (0.8 - f.y) * k; f.z += (bz - f.z) * k; }
     else { f.x += f.vx * dt; f.y += f.vy * dt; f.z += f.vz * dt; f.vy -= 2.5 * dt; f.vx *= 0.92; f.vz *= 0.92; } }
   puffs.forEach((f, i) => puffPos.set([f.x, Math.max(0.05, f.y), f.z], i * 3)); puffGeo.setDrawRange(0, puffs.length); puffGeo.attributes.position.needsUpdate = true;
 }
@@ -456,6 +461,25 @@ function burst(x, y, z, n, hex, sp = 2.5, life = 0.7) { for (let i = 0; i < n; i
 function puff(x, y, z, vx, vy, vz, life) { if (puffs.length < PUFF_MAX) puffs.push({ x, y, z, vx, vy, vz, life, t: 0, suck: false }); }
 const downRing = new THREE.Mesh(new THREE.RingGeometry(0.55, 0.68, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xd7b8ff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
 scene.add(downRing);
+const footMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, uniforms: { uHalf: { value: new THREE.Vector2(1, 1) }, uR: { value: 0.1 }, uOn: { value: 0 } },
+  vertexShader: 'varying vec2 vP; uniform vec2 uHalf; void main(){ vP = (uv - 0.5) * 2.0 * (uHalf + 0.08); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `precision highp float; varying vec2 vP; uniform vec2 uHalf; uniform float uR; uniform float uOn;
+    float sdBox(vec2 p, vec2 b, float r){ vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
+    void main(){ float d = sdBox(vP, uHalf, uR), aa = fwidth(d);
+      float lite = 1.0 - smoothstep(0.018, 0.018 + aa, abs(d + 0.02)), dark = 1.0 - smoothstep(0.014, 0.014 + aa, abs(d + 0.058)), fill = step(d, 0.0);
+      vec3 col = mix(vec3(0.23, 0.21, 0.33), vec3(1.0, 0.96, 0.86), lite);
+      gl_FragColor = vec4(col, max(lite * 0.8, dark * 0.32) + fill * (1.0 - lite) * (1.0 - dark) * (0.07 + 0.05 * uOn)); }` });
+footMat.extensions = { derivatives: true };
+const footMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), footMat); footMesh.position.y = 0.035; footMesh.renderOrder = 2; scene.add(footMesh);
+let footKey = '';
+function stepFoot(S) { // follows the head; size = toolWidth + 2 x brushPad across, dust.brushDepth along (round tools: a disc)
+  const td = toolDef(S), w = toolWidth(S), pad = S.cfg.dust.brushPad || 0, round = td.brush === 'round', key = w + ':' + round;
+  if (key !== footKey) { footKey = key; const ha = round ? (w + 2 * (td.suctionRadius || 0)) / 2 + pad : w / 2 + pad, hd = round ? ha : S.cfg.dust.brushDepth / 2;
+    footMesh.geometry.dispose(); footMesh.geometry = new THREE.PlaneGeometry(2 * (hd + 0.08), 2 * (ha + 0.08)).rotateX(-Math.PI / 2);
+    footMat.uniforms.uHalf.value.set(hd, ha); footMat.uniforms.uR.value = round ? ha : Math.min(0.1, hd); }
+  const hp = headPos(S); footMesh.position.x = hp.x; footMesh.position.z = hp.y; footMesh.rotation.y = -S.player.face;
+  footMat.uniforms.uOn.value = anim.sweepT > 0 ? 1 : 0; footMesh.visible = !cine;
+}
 const dwellRing = padMesh(1.3, 1.3, 0xfff6e8); dwellRing.position.y = 0.04; dwellRing.renderOrder = 3; scene.add(dwellRing);
 const CHEV_N = 9, chevMesh = new THREE.InstancedMesh(new THREE.ShapeGeometry(new THREE.Shape([new THREE.Vector2(0.28, 0), new THREE.Vector2(-0.18, 0.26), new THREE.Vector2(-0.06, 0), new THREE.Vector2(-0.18, -0.26)])).rotateX(-Math.PI / 2),
   new THREE.MeshBasicMaterial({ color: 0xffc857, transparent: true, opacity: 0.75, depthWrite: false }), CHEV_N);
@@ -465,7 +489,7 @@ function stepFx(S, dt) {
   const p = S.player, w = toolWidth(S), fx = Math.cos(p.face), fz = Math.sin(p.face), lx = -fz, lz = fx, sweeping = anim.sweepT > 0 && p.moving;
   if (S.tool > (fxState.tool ?? S.tool)) burst(p.x, 1.2, p.y, 46, 0xffd36b, 3.2, 0.9);                       // tier-up sparkle burst
   fxState.tool = S.tool;
-  if (sweeping && w > 1) { const hp = headPos(S); for (let k = 0; k < Math.min(4, S.tool); k++) { const o = (Math.random() - 0.5) * w; puff(hp.x + lx * o, 0.08, hp.y + lz * o, (Math.random() - 0.5) * 1.2, 0.5 + Math.random(), (Math.random() - 0.5) * 1.2, 0.5); } } // wider head, wider dust
+  if (sweeping && w > 1 && !toolDef(S).vac) { const hp = headPos(S); for (let k = 0; k < Math.min(4, S.tool); k++) { const o = (Math.random() - 0.5) * w; puff(hp.x + lx * o, 0.08, hp.y + lz * o, (Math.random() - 0.5) * 1.2, 0.5 + Math.random(), (Math.random() - 0.5) * 1.2, 0.5); } } // wider head, wider dust
   if ((S.tool === 4 || S.tool === 5) && p.moving && (fxState.exT -= dt) <= 0) {                                 // machine exhaust puffs
     fxState.exT = 0.14; const back = S.tool === 5 ? -0.45 : -0.75, side = S.tool === 5 ? 0.36 : 0.2, h = S.tool === 5 ? 1.25 : 0.8;
     puff(p.x + fx * back + lx * side, h, p.y + fz * back + lz * side, -fx * 0.3, 0.8, -fz * 0.3, 0.6);
@@ -480,6 +504,7 @@ function stepFx(S, dt) {
   sparks.forEach((f, i) => { const a = 1 - f.t / f.life; spkPos.set([f.x, f.y, f.z], i * 3); spkCol.set([f.c.r * a, f.c.g * a, f.c.b * a], i * 3); });
   spkGeo.setDrawRange(0, sparks.length); spkGeo.attributes.position.needsUpdate = spkGeo.attributes.color.needsUpdate = true;
   // dwell ring under the feet: fills while standing on any pad / pay zone / panel / the sell rim, hidden once it fired
+  stepFoot(S);
   const rp = S.ringP || 0; dwellRing.visible = rp > 0.001 && rp < 0.999; dwellRing.position.x = p.x; dwellRing.position.z = p.y; dwellRing.material.uniforms.uProg.value = rp; dwellRing.material.uniforms.uOn.value = 0.4;
   // sell guide: chevrons from the player toward the Depot's field-side wall while the canister is full
   const full = S.can >= capKg(S) - 1e-6 && !inRectT(p.x, p.y, SELL), tx = DEPOT.c + DEPOT.w + 0.3, tz = DEPOT.r + DEPOT.h / 2, dx = tx - p.x, dz = tz - p.y, d = Math.hypot(dx, dz);

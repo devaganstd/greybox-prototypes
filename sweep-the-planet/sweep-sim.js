@@ -21,12 +21,12 @@ const CONFIG = {
   tools: [
     { id: 'Toothbrush', reach: 0.8, width: 1, passes: 3, capKg: 10, speedMult: 1.0, cost: 0 },
     { id: 'Mop', reach: 1.0, brush: 'round', width: 2, passes: 2, capKg: 15, speedMult: 1.0, cost: 45, shineMult: 1.25, shineSec: 60 },
-    { id: 'Wide Mop', reach: 1.1, width: 3, passes: 1.5, capKg: 22, speedMult: 1.0, cost: 300 },
+    { id: 'Upright Vacuum', vac: true, reach: 1.1, width: 3, passes: 1.5, capKg: 22, speedMult: 1.0, cost: 300 },
     { id: 'Push Broom', reach: 1.3, width: 4, passes: 1, capKg: 30, speedMult: 1.0, cost: 800 },
     { id: 'Floor Scrubber', reach: 1.25, width: 5, passes: 1, capKg: 50, speedMult: 1.0, speedUpScale: 0.6, cost: 1250 /* pass 4: 1400 -> 1250 */, turnRate: 3.5 },
     { id: 'Ride-on Sweeper', reach: 1.5, width: 7, passes: 1, capKg: 80, speedMult: 1.05, speedUpScale: 0.6, cost: 5000, turnRate: 2.6, ride: 0.62, autoDumpSec: 30 },
     { id: 'Sweeper Robot', reach: 1.8, width: 9, passes: 1, capKg: 120, speedMult: 1.0, speedUpScale: 0.6, cost: 12000, ride: 1.3, rocksPassable: true },
-    { id: 'Hover Sweeper', reach: 1.5, width: 11, passes: 1, capKg: 160, speedMult: 1.25, speedUpScale: 0.5, cost: 30000, ride: 0.55, rocksPassable: true },
+    { id: 'Hover Vacuum', vac: true, reach: 1.5, width: 11, passes: 1, capKg: 160, speedMult: 1.25, speedUpScale: 0.5, cost: 30000, ride: 0.55, rocksPassable: true },
   ],
   // Balancing (owner pass 4): every branch has a max level; level i (0-based) adds max(step - decay * i, 0) (diminishing returns);
   // cost = base * growth^level. Speed: steeper growth, a short ladder and a hard cap on the bonus over the tier's base speed

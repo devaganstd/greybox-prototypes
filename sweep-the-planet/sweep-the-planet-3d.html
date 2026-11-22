@@ -36,7 +36,7 @@
 <div id="err"></div>
 <div id="cap"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=frame1"></script>
+<script src="sweep-sim.js?v=ftue1"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -668,7 +668,7 @@ function updateWorld(S, realDt) {
   }
   syncReveal(S);
   for (const [id, z] of Object.entries(ZONES)) {
-    const on = inZone(S, z), U = z.pad.material.uniforms; U.uOn.value = on ? 1 : id === 'sell' && S.can >= capKg(S) - 1e-6 ? 0.6 : 0;
+    const on = inZone(S, z), U = z.pad.material.uniforms; U.uOn.value = on ? 1 : (id === 'sell' && S.can >= capKg(S) - 1e-6) || id === S.ftue.wantZone ? 0.6 : 0;
     if (z.kind !== 'pay') continue;
     const pz = PAYZ[id], ok = pz.ok(S), cost = ok ? pz.cost(S) : 0, paid = ok && cost > 0 ? clamp((S.zonePaid[id] || 0) / cost, 0, 1) : 0;
     U.uProg.value = paid;
@@ -807,9 +807,9 @@ function upIcon(id, x, y, col) {
 const LABEL = { capacity: 'Capacity', width: 'Width', speed: 'Speed', payout: 'Payout', panelBoost: 'Panel Boost' };
 const EFFECT = { capacity: 'canister kg', width: 'sweep width', speed: 'walk speed', payout: 'sell price', panelBoost: 'panel $/s' };
 const showFuel = S => S.t > 240 || S.launches > 0; // Fuel joins the HUD at the fuel FTUE (minute 4), batch7c R8
-const zoneC = z => ({ x: z.c + z.w / 2, z: z.r + z.h / 2 });
+const zoneC = z => ({ x: z.c + z.w / 2, z: z.r + z.h / 2, y: 3 }); // y: the goal arrow floats above the pad's 3D label
 function goalTarget(S) {
-  if (S.can >= capKg(S) - 1e-6) return { x: SELL_C.x, z: SELL_C.y, label: 'Sell' };
+  if (S.can >= capKg(S) - 1e-6) return Object.assign(zoneC(ZONES.sell), { label: 'Sell' });
   const g = nextGate(S); if (g > 0 && S.cash >= gateCost(S, g) - S.gatePaid) return { x: PADS[g].c + 1, z: PADS[g].r + 1, label: 'Gate' };
   if (canLaunch(S)) return Object.assign(zoneC(ZONES.launch), { label: 'Launch' });
   if (S.crewOpen && costOf(S, 'keeper') === 0) return Object.assign(zoneC(ZONES.crew), { label: 'Free Keeper' });
@@ -862,7 +862,7 @@ function drawOverlay(S) {
   // goal arrow
   const tg = k < 0.1 && !CAPTURE && goalTarget(S);
   if (tg) {
-    const s = toScreen(tg.x, 0, tg.z);
+    const s = toScreen(tg.x, tg.y || 0, tg.z);
     if (!s.behind && s.x > 20 && s.x < W - 20 && s.y > HUD_H + 20 && s.y < H - 20) { ctx.strokeStyle = PAL.yellow; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(s.x, s.y - 30, 6 + 3 * Math.sin(S.t * 6), 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = PAL.yellow; ctx.beginPath(); ctx.moveTo(s.x - 7, s.y - 22); ctx.lineTo(s.x + 7, s.y - 22); ctx.lineTo(s.x, s.y - 12); ctx.fill(); }
     else { const cy = (HUD_H + H) / 2, a = Math.atan2(s.y - cy, s.x - W / 2) + (s.behind ? Math.PI : 0), ex = clamp(W / 2 + Math.cos(a) * 500, 22, W - 22), ey = clamp(cy + Math.sin(a) * 500, HUD_H + 22, H - 22);
       ctx.save(); ctx.translate(ex, ey); ctx.rotate(a); ctx.fillStyle = PAL.yellow; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.closePath(); ctx.fill(); ctx.restore();
@@ -914,7 +914,7 @@ function drawOverlay(S) {
     }
   }
 }
-// P0-4 scripted FTUE (first 5 minutes, Moon only). Steps run in this order, one at a time; a step shows once its `when` holds and
+// P0-4 scripted FTUE (first 5 minutes on the Moon, plus a Helper hint on Mercury). The step's pad glows and the goal arrow points at it. Steps run in this order, one at a time; a step shows once its `when` holds and
 // completes on `done` (a step already satisfied completes the moment it is reached). force = time-scripted, cuts in even if earlier
 // steps are open: the storm (sim firstStormAtSec = 2:10) and the Fuel teaser (minute 4). Each completion logs ftue_step.
 const FTUE = [
@@ -922,19 +922,23 @@ const FTUE = [
   { id: 'lit', text: 'Clean tiles light up and pay $/s', when: S => S.everCount >= 4, done: S => S.t - S.ftue.shownAt.lit > 5 },
   { id: 'depot', text: 'Canister full: stand on the SELL pad', when: S => S.can >= capKg(S) - 1e-6 || S.tele.firstSell != null, done: S => S.tele.firstSell != null, zone: 'sell' },
   { id: 'cap', text: 'Stand on UPGRADES and buy Capacity', when: S => canBuy(S, 'capacity') || S.up.capacity > 0, done: S => S.up.capacity > 0, zone: 'terminal' },
+  { id: 'tool', text: 'Stand on the TOOL RACK: get the ' + CONFIG.tools[1].id, when: S => canBuy(S, 'tool') || S.tool > 0, done: S => S.tool > 0, zone: 'tool' },
   { id: 'gate', text: 'Stand on the gold pad to open Sector 2', when: S => S.unlocked[1] || S.cash >= gateCost(S, 1) - S.gatePaid, done: S => S.unlocked[1] },
   { id: 'storm', force: true, text: 'Dust Storm! Lit panels go dark: sweep them again', when: S => S.storm.count > 0 || S.storm.phase !== 'idle', done: S => S.keepers.length > 0 || (S.storm.count > 0 && S.t - S.ftue.shownAt.storm > 10) },
   { id: 'keeper', text: 'Free Keeper Drone at the CREW BAY', when: S => canBuy(S, 'keeper') || S.keepers.length > 0, done: S => S.keepers.length > 0, zone: 'crew' },
-  { id: 'tool', text: 'Stand on the TOOL RACK for a bigger tool', when: S => canBuy(S, 'tool') || S.tool > 0, done: S => S.tool > 0, zone: 'tool' },
   { id: 'fuel', force: true, text: 'REFINERY: Dust → Fuel. Full tank + 70% Lit = Launch', when: S => S.t > 240, done: S => inZone(S, ZONES.refinery) || S.t - S.ftue.shownAt.fuel > 12, zone: 'refinery' },
+  { id: 'launch', text: 'Tank full + 70% Lit: stand on LAUNCH', when: S => canLaunch(S), done: S => S.launches > 0, zone: 'launch' },
+  // Mercury (planet 1): one hint for the Helper Robot
+  { id: 'helper', planet: 1, text: 'Hire a Helper Robot: it sweeps new dust for you', when: S => S.t > 20 && (canBuy(S, 'helper') || S.helpers.length > 0), done: S => S.helpers.length > 0, zone: 'helper' },
 ];
 function activeFtue(S) {
   const F = S.ftue; F.wantZone = null;
-  if (S.planet > 0 || CAPTURE) return null;
-  for (const [n, f] of FTUE.entries()) if (!F.done[f.id] && F.shownAt[f.id] != null && f.done(S)) {
+  if (CAPTURE) return null;
+  const steps = FTUE.filter(f => (f.planet || 0) === Math.min(S.planet, 1) && (f.planet || S.launches === 0)); // Moon script on the first run only; Mercury gets the Helper hint
+  for (const [n, f] of steps.entries()) if (!F.done[f.id] && F.shownAt[f.id] != null && f.done(S)) {
     F.done[f.id] = true; ev(S, 'ftue_step', { step: n + 1, id: f.id, waitSec: +(S.t - F.shownAt[f.id]).toFixed(1) });
   }
-  const f = FTUE.find(x => x.force && !F.done[x.id] && x.when(S)) || FTUE.find(x => !F.done[x.id]);
+  const f = steps.find(x => x.force && !F.done[x.id] && x.when(S)) || steps.find(x => !F.done[x.id]);
   if (!f || !f.when(S)) return null;
   F.shownAt[f.id] ??= S.t; F.wantZone = f.zone || null; return f;
 }

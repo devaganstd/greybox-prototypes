@@ -109,11 +109,11 @@ function blob(parent, sx, sz, x = 0, z = 0) { const m = new THREE.Mesh(blobGeo, 
 // the seams are the light lanes: each tile next to a seam carries a short lane light that powers up (warm flicker, flickerSec) when the
 // tile turns Lit, and the Lit tile brightens its plate softly. Hatches on ~1 in 12 plates. A storm-dusted tile goes dark (unpowered).
 // Grid Link = the lane seam glowing warm, pulsing toward the Depot. LIT_LOOK + deckSurface() are the single place for this look.
-const LIT_LOOK = { deck: 0xdcdde4, seam: 0x9c9dad, strip: 0xffc47a, stripOff: 0x7d778f, link: 0xffa94d, linkGlow: 0.5, gloss: 0.14, flickerSec: 0.7, unpowered: 0.86, plate: 4, hatchOdds: 1 / 12 };
-const GROUND = { regolith: 0x9a91a8, trim: 0x8a8399, marker: 0xff8a3d };
+const LIT_LOOK = { deck: 0xe8e9ee, seam: 0x9c9dad, strip: 0xffc47a, stripOff: 0x7d778f, link: 0xffa94d, linkGlow: 0.5, gloss: 0.14, flickerSec: 0.7, unpowered: 0.86, plate: 4, hatchOdds: 1 / 12 };
+const GROUND = { regolith: 0x6f6783, trim: 0x8a8399, marker: 0xff8a3d };
 // P0-3: per-planet palette (index = sim S.planet). Mercury = orange regolith, yellow-hot sky, the Sun instead of Earth.
 const PLANET_LOOK = [
-  { regolith: GROUND.regolith, trim: GROUND.trim, clear: 0x141022, rock: 0x8c86a0, crater: 0x7a7290, earth: true },
+  { regolith: GROUND.regolith, trim: GROUND.trim, clear: 0x141022, rock: 0x625b75, crater: 0x554e6a, earth: true },
   { regolith: 0xd98a45, trim: 0xc27a3a, clear: 0x2a1608, rock: 0xb0703a, crater: 0xb86a30, earth: false },
 ];
 const SETTLE_SEC = 1.2; // storm dust settles into the mask over this long (no floor wave)

@@ -61,7 +61,7 @@ const ZONES = {
   refinery: Object.assign({ kind: 'panel', label: 'REFINERY', bg: PAL.purple }, PADZ.refinery),
   launch: Object.assign({ kind: 'panel', label: 'LAUNCH', bg: PAL.orange }, PADZ.launch),
 };
-const CAM = { fov: 34, pitchDeg: 56, yawDeg: 30, dist: 44, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.8 };
+const CAM = { fov: 36, pitchDeg: 56, yawDeg: 30, dist: 58, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.8 };
 const errBox = document.getElementById('err');
 addEventListener('error', e => { errBox.style.display = 'block'; errBox.textContent += (e.message || e) + '\n'; });
 
@@ -246,7 +246,7 @@ scene.add(new THREE.Mesh(groundGeo, groundMat));
 const terrainMat = new THREE.ShaderMaterial({ uniforms: { uSun: sunU, uReg: regU, uAlarm: alarmU },
   vertexShader: 'varying vec3 vW; varying vec3 vN; void main(){ vW = (modelMatrix * vec4(position, 1.0)).xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0); }',
   fragmentShader: 'precision highp float; varying vec3 vW; varying vec3 vN;' + REGOLITH_GLSL + ' void main(){ gl_FragColor = vec4(alarm(regolith(vW.xz, normalize(vN))), 1.0); }' });
-const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 5, z: 59 }, INTRO_F = { x: 0.5, z: 58.5 }, K_EST = Math.log(80 / 44) / Math.log(175 / 44); // hub dome centre (world); camera focus near the base
+const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 5, z: 59 }, INTRO_F = { x: 0.5, z: 58.5 }, K_EST = Math.log(100 / 58) / Math.log(175 / 58); // hub dome centre (world); camera focus near the base
 const MOON_R = 150, MOON_C = new THREE.Vector3(C / 2, -0.4 - MOON_R, R / 2);
 const CRATERS = [[-14, 20, 5], [62, 8, 7], [58, 60, 4.5], [-10, 66, 6], [20, -12, 6], [70, 90, 8], [-22, 45, 4], [30, 86, 5], [80, 35, 5], [5, 95, 7], [-40, -10, 9], [95, 70, 9]];
 function terrainH(x, z) {

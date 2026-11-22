@@ -36,7 +36,7 @@
 <div id="err"></div>
 <div id="cap"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=helper1"></script>
+<script src="sweep-sim.js?v=layout2"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -50,10 +50,12 @@ import { GLTFLoader } from './lib/addons/loaders/GLTFLoader.js';
 // P0-2 creative capture: ?capture=s1|s2|s3 = UI-off 9:16 frame (390 x 693), fixed seed, scripted camera, record bar outside the frame.
 const CAPTURE = ((new URLSearchParams(location.search).get('capture') || '').toLowerCase().match(/^s[123]$/) || [null])[0];
 const W = 390, H = CAPTURE ? 693 : 844, HUD_H = 60;
-// in-world pads: rects come from the sim (PADZ, clean foundation, outside the Depot so they never sell). kind: 'panel' opens a sheet, 'pay' is a pay zone.
+// in-world pads: rects come from the sim (PADZ, clean foundation, each directly in front of its building). kind: 'sell' sells after
+// sellDwellSec (in the sim), 'panel' opens a sheet, 'pay' is a pay zone.
 // One palette for world and UI: plum night, cream buildings, warm orange accent, soft lilac Moon; pad colours below.
 const PAL = { plum: '#2b2640', plumHi: '#3a3354', cream: '#FFF6E8', orange: '#FF8A3D', yellow: '#FFC857', teal: '#3FC8B8', mint: '#8EE3B5', purple: '#B48CFF', red: '#FF6B57', mute: '#b9b0cf' };
 const ZONES = {
+  sell: Object.assign({ kind: 'sell', label: 'SELL', bg: '#FFD45E' }, PADZ.sell),
   terminal: Object.assign({ kind: 'panel', label: 'UPGRADES', bg: PAL.teal }, PADZ.terminal),
   tool: Object.assign({ kind: 'pay', label: 'TOOL RACK', bg: PAL.yellow }, PADZ.tool),
   crew: Object.assign({ kind: 'pay', label: 'CREW BAY', bg: PAL.mint }, PADZ.crew),
@@ -246,7 +248,7 @@ scene.add(new THREE.Mesh(groundGeo, groundMat));
 const terrainMat = new THREE.ShaderMaterial({ uniforms: { uSun: sunU, uReg: regU, uAlarm: alarmU },
   vertexShader: 'varying vec3 vW; varying vec3 vN; void main(){ vW = (modelMatrix * vec4(position, 1.0)).xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0); }',
   fragmentShader: 'precision highp float; varying vec3 vW; varying vec3 vN;' + REGOLITH_GLSL + ' void main(){ gl_FragColor = vec4(alarm(regolith(vW.xz, normalize(vN))), 1.0); }' });
-const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 5, z: 59 }, INTRO_F = { x: 0.5, z: 58.5 }, K_EST = Math.log(100 / 58) / Math.log(175 / 58); // hub dome centre (world); camera focus near the base
+const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 4.5, z: 59 }, INTRO_F = { x: 1, z: 59 }, K_EST = Math.log(100 / 58) / Math.log(175 / 58); // hub dome centre (world); camera focus near the base
 const MOON_R = 150, MOON_C = new THREE.Vector3(C / 2, -0.4 - MOON_R, R / 2);
 const CRATERS = [[-14, 20, 5], [62, 8, 7], [58, 60, 4.5], [-10, 66, 6], [20, -12, 6], [70, 90, 8], [-22, 45, 4], [30, 86, 5], [80, 35, 5], [5, 95, 7], [-40, -10, 9], [95, 70, 9]];
 function terrainH(x, z) {
@@ -302,22 +304,24 @@ const rockDecor = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42), 
 const bc = b => ({ x: b.c + b.w / 2, z: b.r + b.h / 2 });
 function bldg(b, ry = 0) { const g = new THREE.Group(), p = bc(b); g.position.set(p.x, 0, p.z); g.rotation.y = ry; scene.add(g); g.userData.blob = blob(scene, b.w + 0.7, b.h + 0.7, p.x, p.z); return g; }
 const depot = bldg(DEPOT);
-{ const b = new THREE.Mesh(new THREE.BoxGeometry(3.1, 1.6, 3.1), lam(0xf3e6cf)); b.position.y = 0.8; depot.add(b);
-  const s = new THREE.Mesh(new THREE.BoxGeometry(3.12, 0.3, 3.12), lam(0xff8a3d)); s.position.y = 0.25; depot.add(s); }
+{ const b = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.6, 1.6), lam(0xf3e6cf)); b.position.y = 0.8; depot.add(b);
+  const s = new THREE.Mesh(new THREE.BoxGeometry(2.62, 0.3, 1.62), lam(0xff8a3d)); s.position.y = 0.25; depot.add(s); }
 const refinery = bldg(BLDG.refinery);
 const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 2.0, 16), toon(0xc9c2d6, { transparent: true, opacity: 0.45 }, false)); tank.position.y = 1.3; refinery.add(tank);
 const fuelFill = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.52, 1, 16), toon(0xb48cff)); refinery.add(fuelFill);
 const launchPad = bldg(BLDG.launch), rocket = new THREE.Group(); launchPad.add(rocket);
 { const body = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.25, 5.6, 16), lam(0xf7f2e8)); body.position.y = 3.6; rocket.add(body); }
 let rocketNose = new THREE.Mesh(new THREE.ConeGeometry(1.2, 2.6, 16), lam(0xff8a3d)); rocketNose.position.y = 7.7; rocket.add(rocketNose);
-const terminal = bldg(BLDG.terminal, -Math.PI / 2); terminal.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.2, 0.9), lam(0xf3e6cf))).children[0].position.y = 0.6;
-const rack = bldg(BLDG.rack, Math.PI / 2); rack.add(new THREE.Mesh(new THREE.BoxGeometry(0.25, 1.0, 2.4), lam(0xc9c2d6))).children[0].position.y = 0.5;
+const terminal = bldg(BLDG.terminal); terminal.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.2, 0.9), lam(0xf3e6cf))).children[0].position.y = 0.6;
+const rack = bldg(BLDG.rack); rack.add(new THREE.Mesh(new THREE.BoxGeometry(0.25, 1.0, 1.6), lam(0xc9c2d6))).children[0].position.y = 0.5;
 // Moon Station hub: dome off-map to the west, airlock tube onto the deck (sim BLDG.hub is the solid, clean footprint)
 const hub = new THREE.Group(); hub.position.set(BLDG.hub.c, 0, HUB_W.z); scene.add(hub); blob(scene, 6.4, 6.4, HUB_W.x, HUB_W.z);
 { const d = new THREE.Mesh(new THREE.SphereGeometry(2.45, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), lam(0xf3e6cf)); d.scale.y = 0.78; d.position.set(HUB_W.x - BLDG.hub.c, 0.3, 0); hub.add(d);
   const t = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 3.4, 12), lam(0xc9c2d6)); t.rotation.z = Math.PI / 2; t.position.set(-0.55, 0.75, 0); hub.add(t); }
-const crewBay = bldg(BLDG.hangar, Math.PI / 2); // always visible: its collider (BLDG.hangar) is always solid; only the pad opens after the first storm
-crewBay.add(new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.3, 2.6), lam(0xf3e6cf))).children[0].position.y = 0.65;
+const crewBay = bldg(BLDG.hangar); // always visible: its collider (BLDG.hangar) is always solid; only the pad opens after the first storm
+crewBay.add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.3, 1.6), lam(0xf3e6cf))).children[0].position.y = 0.65;
+const dock = bldg(BLDG.dock); // Helper Dock: always standing (planned base); its pad opens on Mercury
+dock.add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.2, 1.6), lam(0xf3e6cf))).children[0].position.y = 0.6;
 // floor pads: rounded ring (pad colour), inner glow when stood on, bright arc = paid progress for pay zones
 function ringMat(hex) {
   return new THREE.ShaderMaterial({ transparent: true, depthWrite: false,
@@ -346,8 +350,6 @@ for (const [id, z] of Object.entries(ZONES)) {
   z.pad = padMesh(z.w, z.h, parseInt(z.bg.slice(1), 16)); z.pad.position.set(z.c + z.w / 2, 0.025, z.r + z.h / 2); scene.add(z.pad);
   z.label3d = labelSprite(); z.label3d.position.set(z.c + z.w / 2, 2.2, z.r + z.h / 2); z.label3d.userData.set(z.label, z.bg);
 }
-const sellPad = padMesh(SELL.w, SELL.h, 0xffd45e); sellPad.position.set(SELL.c + SELL.w / 2, 0.026, SELL.r + SELL.h / 2); scene.add(sellPad); // the sell trigger: a gold rim around the Depot
-const sellLabel = labelSprite(); sellLabel.position.set(DEPOT_C.x, 3.2, DEPOT_C.y); sellLabel.userData.set('SELL', '#FFF6E8');
 const gateGroup = new THREE.Group(); scene.add(gateGroup);
 const gateRing = padMesh(2, 2, 0xffc857); gateRing.position.y = 0.03; gateGroup.add(gateRing);
 const gateLabel = labelSprite();
@@ -411,7 +413,7 @@ function useAssets(gltf) {
   astro = addOutline(ASSETS.clone('astronaut')); player.add(astro); bobObj = astro.getObjectByName('astro_body'); bobY = 0;
   canFill.geometry = new THREE.BoxGeometry(0.07, 1, 0.22); canFill.position.x = -0.54; bobObj.add(canFill);
   if (ASSETS.has('hub')) swap(hub, 'hub'); swap(depot, 'depot'); swap(refinery, 'refinery'); swap(terminal, 'terminal'); swap(rack, 'rack');
-  swap(crewBay, 'hangar', 0, -0.35); const rv = swap(crewBay, 'rover', Math.PI / 2, 0.55, 0.75); rv.scale.setScalar(0.7);
+  swap(crewBay, 'hangar'); if (ASSETS.has('dock')) swap(dock, 'dock');
   launchPad.children.forEach(c => { if (c.isMesh) c.visible = false; }); addOutline(launchPad.add(ASSETS.clone('launchpad')).children.at(-1));
   rocket.children.forEach(c => { c.visible = false; }); const rk = addOutline(ASSETS.clone('rocket')); rocket.add(rk);
   rocketNose = rk.getObjectByName('rnose').children.find(c => c.isMesh) || rk.getObjectByName('rnose'); rocketNose.material = rocketNose.material.clone();
@@ -424,7 +426,7 @@ function useAssets(gltf) {
   SP.assets = 'glb';
 }
 SP.assets = 'loading';
-new GLTFLoader().load('assets/sweep-assets.glb?v=helper1', g => { useAssets(g); LOAD.assets = performance.now(); }, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+new GLTFLoader().load('assets/sweep-assets.glb?v=layout1', g => { useAssets(g); LOAD.assets = performance.now(); }, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
 // code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
 const anim = { squash: 0, lastCan: 0, sweepT: 0, tierPop: 0, lastTool: 0 };
 function animatePlayer(S, p, dt) {
@@ -515,8 +517,8 @@ function stepFx(S, dt) {
   // dwell ring under the feet: fills while standing on any pad / pay zone / panel / the sell rim, hidden once it fired
   stepFoot(S);
   const rp = S.ringP || 0; dwellRing.visible = rp > 0.001 && rp < 0.999; dwellRing.position.x = p.x; dwellRing.position.z = p.y; dwellRing.material.uniforms.uProg.value = rp; dwellRing.material.uniforms.uOn.value = 0.4;
-  // sell guide: chevrons from the player toward the Depot's field-side wall while the canister is full
-  const full = S.can >= capKg(S) - 1e-6 && !inRectT(p.x, p.y, SELL), tx = DEPOT.c + DEPOT.w + 0.3, tz = DEPOT.r + DEPOT.h / 2, dx = tx - p.x, dz = tz - p.y, d = Math.hypot(dx, dz);
+  // sell guide: chevrons from the player toward the Sell pad while the canister is full
+  const full = S.can >= capKg(S) - 1e-6 && !inRectT(p.x, p.y, SELL), tx = SELL_C.x, tz = SELL_C.y, dx = tx - p.x, dz = tz - p.y, d = Math.hypot(dx, dz);
   chevMesh.visible = full && d > 1.5;
   if (chevMesh.visible) { const ux = dx / d, uz = dz / d, off = (S.t * 1.6) % 1.1; tmpQ.setFromEuler(new THREE.Euler(0, -Math.atan2(uz, ux), 0));
     for (let i = 0; i < CHEV_N; i++) { const s = 1.0 + off + i * 1.1, a = s < d - 0.6 ? Math.min(1, (d - 0.6 - s) / 1.2) : 0; chevMesh.setMatrixAt(i, tmpM.compose(tmpV.set(p.x + ux * s, 0.05, p.y + uz * s), tmpQ, tmpS.setScalar(a * Math.min(1, s / 1.6)))); }
@@ -632,7 +634,7 @@ function updateWorld(S, realDt) {
   const tp = anim.tierPop > 0 ? Math.sin(Math.PI * (1 - anim.tierPop / 1.2)) : 0;
   toolGroup.scale.set(Math.max(0.3, headPos(S).d / (S.cfg.tools[S.tool].reach || 0.9)) * (1 + 0.35 * tp), 1 + 0.35 * tp, 1 + 0.35 * tp); // head stops at a wall or rock
   const nt = S.cfg.tools[S.tool + 1], rk = nt ? String(S.tool + 1) : '';
-  if (rk !== rackKey) { rackKey = rk; if (rackTool) scene.remove(rackTool); rackTool = nt ? buildTool(S.tool + 1, nt.width, nt.reach || 0.9) : null; if (rackTool) { rackTool.position.set(BLDG.rack.c + 1.5, 1.35, BLDG.rack.r + 0.5); rackTool.rotation.z = nt.ride ? 0 : 0.9; rackTool.scale.setScalar(Math.min(1, 2.4 / Math.max(nt.width, (nt.reach || 1) + 0.8))); scene.add(rackTool); } }
+  if (rk !== rackKey) { rackKey = rk; if (rackTool) scene.remove(rackTool); rackTool = nt ? buildTool(S.tool + 1, nt.width, nt.reach || 0.9) : null; if (rackTool) { rackTool.position.set(BLDG.rack.c + 1.5, 1.35, BLDG.rack.r + 1); rackTool.rotation.z = nt.ride ? 0 : 0.9; rackTool.scale.setScalar(Math.min(1, 2.4 / Math.max(nt.width, (nt.reach || 1) + 0.8))); scene.add(rackTool); } }
   if (rackTool) rackTool.rotation.y = S.t;
   const ck = clamp(S.can / capKg(S), 0, 1), full = ck >= 0.999;
   canFill.scale.y = Math.max(0.001, ck * 0.7); canFill.position.y = 0.35 + ck * 0.35; canFill.material.color.setHex(full && Math.sin(S.t * 12) > 0 ? 0xff6b57 : 0xff8a3d);
@@ -662,9 +664,8 @@ function updateWorld(S, realDt) {
     gateLabel.position.set(pd.c + pd.w / 2, 2.4, pd.r + pd.h / 2); gateLabel.userData.set('$' + fmt(cost - S.gatePaid));
   }
   syncReveal(S);
-  sellPad.material.uniforms.uOn.value = inRectT(S.player.x, S.player.y, SELL) ? 1 : S.can >= capKg(S) - 1e-6 ? 0.6 : 0.25;
   for (const [id, z] of Object.entries(ZONES)) {
-    const on = inZone(S, z), U = z.pad.material.uniforms; U.uOn.value = on ? 1 : 0;
+    const on = inZone(S, z), U = z.pad.material.uniforms; U.uOn.value = on ? 1 : id === 'sell' && S.can >= capKg(S) - 1e-6 ? 0.6 : 0;
     if (z.kind !== 'pay') continue;
     const pz = PAYZ[id], ok = pz.ok(S), cost = ok ? pz.cost(S) : 0, paid = ok && cost > 0 ? clamp((S.zonePaid[id] || 0) / cost, 0, 1) : 0;
     U.uProg.value = paid;
@@ -685,7 +686,7 @@ const PAYZ = {
 };
 function stepPayZones(S, dt) {
   const ready = S.zoneReady || (S.zoneReady = {});
-  for (const [id, z] of Object.entries(ZONES)) ready[id] = dwell(S, 'z:' + id, (z.kind !== 'pay' || PAYZ[id].ok(S)) && inZone(S, z), dt, S.cfg.ui.dwellSec);
+  for (const [id, z] of Object.entries(ZONES)) ready[id] = z.kind !== 'sell' && dwell(S, 'z:' + id, (z.kind !== 'pay' || PAYZ[id].ok(S)) && inZone(S, z), dt, S.cfg.ui.dwellSec); // the sim owns the Sell dwell
   for (const [id, pz] of Object.entries(PAYZ)) {
     if (!pz.ok(S) || !ready[id]) continue;
     const cost = pz.cost(S), paid = S.zonePaid[id] || 0, pay = Math.min(S.cash, cost * dt / S.cfg.ui.payZoneSec, cost - paid);
@@ -805,7 +806,7 @@ const EFFECT = { capacity: 'canister kg', width: 'sweep width', speed: 'walk spe
 const showFuel = S => S.t > 240 || S.launches > 0; // Fuel joins the HUD at the fuel FTUE (minute 4), batch7c R8
 const zoneC = z => ({ x: z.c + z.w / 2, z: z.r + z.h / 2 });
 function goalTarget(S) {
-  if (S.can >= capKg(S) - 1e-6) return { x: DEPOT_C.x, z: DEPOT_C.y, label: 'Sell' };
+  if (S.can >= capKg(S) - 1e-6) return { x: SELL_C.x, z: SELL_C.y, label: 'Sell' };
   const g = nextGate(S); if (g > 0 && S.cash >= gateCost(S, g) - S.gatePaid) return { x: PADS[g].c + 1, z: PADS[g].r + 1, label: 'Gate' };
   if (canLaunch(S)) return Object.assign(zoneC(ZONES.launch), { label: 'Launch' });
   if (S.crewOpen && costOf(S, 'keeper') === 0) return Object.assign(zoneC(ZONES.crew), { label: 'Free Keeper' });
@@ -916,7 +917,7 @@ function drawOverlay(S) {
 const FTUE = [
   { id: 'move', text: 'Drag anywhere to sweep', when: S => S.t > 3, done: S => S.everCount >= 4 },
   { id: 'lit', text: 'Clean tiles light up and pay $/s', when: S => S.everCount >= 4, done: S => S.t - S.ftue.shownAt.lit > 5 },
-  { id: 'depot', text: 'Canister full: walk into the Depot to sell', when: S => S.can >= capKg(S) - 1e-6 || S.tele.firstSell != null, done: S => S.tele.firstSell != null },
+  { id: 'depot', text: 'Canister full: stand on the SELL pad', when: S => S.can >= capKg(S) - 1e-6 || S.tele.firstSell != null, done: S => S.tele.firstSell != null, zone: 'sell' },
   { id: 'cap', text: 'Stand on UPGRADES and buy Capacity', when: S => canBuy(S, 'capacity') || S.up.capacity > 0, done: S => S.up.capacity > 0, zone: 'terminal' },
   { id: 'gate', text: 'Stand on the gold pad to open Sector 2', when: S => S.unlocked[1] || S.cash >= gateCost(S, 1) - S.gatePaid, done: S => S.unlocked[1] },
   { id: 'storm', force: true, text: 'Dust Storm! Lit panels go dark: sweep them again', when: S => S.storm.count > 0 || S.storm.phase !== 'idle', done: S => S.keepers.length > 0 || (S.storm.count > 0 && S.t - S.ftue.shownAt.storm > 10) },
@@ -1062,13 +1063,13 @@ function selfTest3d() {
   T.crewOpen = true; T.player.x = ZONES.crew.c + 1; T.player.y = ZONES.crew.r + 1; stepPayZones(T, 0.05); const notYet = T.keepers.length === 0;
   for (let i = 0; i < 12; i++) stepPayZones(T, 0.05); r.freeKeeper = notYet && T.keepers.length === 1;
   // dwell: walking straight across the Upgrades pad never opens its panel; standing on it does
-  const Wk = newGame(JSON.parse(JSON.stringify(CONFIG)), { headless: true }), zt = ZONES.terminal; Wk.player.x = zt.c - 0.4; Wk.player.y = zt.r + 1.5; let opened = false;
-  for (let i = 0; i < 24; i++) { step(Wk, 0.05, { x: 1, y: 0 }); stepPayZones(Wk, 0.05); opened = opened || !!activeSheet(Wk); }
-  const crossed = Wk.player.x > zt.c + zt.w; Wk.player.x = zt.c + 1.5; for (let i = 0; i < 13; i++) { step(Wk, 0.05, null); stepPayZones(Wk, 0.05); }
+  const Wk = newGame(JSON.parse(JSON.stringify(CONFIG)), { headless: true }), zt = ZONES.terminal; Wk.player.x = zt.c + 2.5; Wk.player.y = zt.r - 0.6; let opened = false; // walk straight down through the pad (gap row to gap row)
+  Wk.zonePaid = {}; for (let i = 0; i < 11; i++) { step(Wk, 0.05, { x: 0, y: 1 }); stepPayZones(Wk, 0.05); opened = opened || !!activeSheet(Wk); }
+  const crossed = Wk.player.y > zt.r + zt.h; Wk.player.x = zt.c + 1.5; Wk.player.y = zt.r + 1; for (let i = 0; i < 13; i++) { step(Wk, 0.05, null); stepPayZones(Wk, 0.05); }
   r.dwellPanel = !opened && crossed && activeSheet(Wk) === 'terminal';
   // every sim collider has a visible 3D building from the very first frame (owner bug: the hidden Crew Bay hangar was an invisible wall)
   { const F = newGame(JSON.parse(JSON.stringify(CONFIG)), { headless: true }); syncReveal(F);
-    const SOLID_MESH = { depot, terminal: terminal, rack, hangar: crewBay, refinery, launch: launchPad, hub };
+    const SOLID_MESH = { depot, terminal: terminal, rack, hangar: crewBay, dock, refinery, launch: launchPad, hub };
     r.noInvisibleSolids = Object.keys(BLDG).every(k => SOLID_MESH[k] && SOLID_MESH[k].visible) && depot.visible && SOLIDS.length === Object.keys(BLDG).length + 1; syncReveal(G); }
   if (ASSETS) r.hubAsset = ASSETS.has('hub');
   if (ASSETS) r.helperAsset = ASSETS.has('helper');

@@ -51,7 +51,7 @@ const CONFIG = {
   launch: { stardustPerLitPct: 0.1 },
   // Mercury (owner 2026-11-22: full planet + Helper Robots): same base layout, all 6 sectors; fresh dust 5x thicker (storm fallout stays
   // light), gates x0.6, rocket tank x2.5, so it is sweep-bound and Helpers matter. The 3D layer owns the palette.
-  planets: [{ id: 'Moon', sectors: 6 }, { id: 'Mercury', sectors: 6, helpers: true, passMult: 5, gateMult: 0.6, tankMult: 2.5 }],
+  planets: [{ id: 'Moon', sectors: 6 }, { id: 'Mercury', sectors: 6, helpers: true, passMult: 5, gateMult: 0.6, tankMult: 2.35 }],
   offline: { capMin: 120, noKeeperUptime: 0.4, keeperTravelFactor: 0.5 },
   ads: { firstAdMinSec: 240 }, // no ads in greybox; kept for reference
   // dwellSec: every pad / pay zone / panel fires only after the player stands on it this long (stepping off resets; walking through
@@ -82,20 +82,22 @@ const C = 48, R = 72, N = C * R;
 // World layout (tile coords). Every rect below is a clean foundation: no dust, not sweepable, not in Moon %, skipped by storms
 // (KIND != 0: 1 = Depot plate, the Grid Link source; 2 = pads, building plates, gate pads; 3 = rock). SOLIDS and ROCKS block the
 // player, the Keepers and the tool head (circle vs box). The 3D layer places every mesh from these numbers.
-// Base plaza (owner pass 4): every building sits on one clean station-deck plaza on the west edge around the Moon Station hub;
-// the field east of it is only dust. The plaza is a Grid Link source (KIND 1) like the Depot: the station powers the deck.
-const PLAZA = { c: 0, r: 50, w: 8, h: 22 };
-const DEPOT = { c: 3, r: 60, w: 4, h: 4 }; // Depot plate; the building fills it except a 0.45 rim, standing at its wall sells
-const DEPOT_C = { x: DEPOT.c + 2, y: DEPOT.r + 2 };
-const SELL = { c: DEPOT.c - 0.9, r: DEPOT.r - 0.9, w: DEPOT.w + 1.8, h: DEPOT.h + 1.8 }; // touching the building's wall sells (walk steps stop up to 0.3 short of it)
-const PADZ = { // stand-on pads (3D: panel or pay zone)
-  terminal: { c: 1, r: 56, w: 3, h: 3 }, tool: { c: 1, r: 67, w: 3, h: 3 }, crew: { c: 5, r: 67, w: 3, h: 3 }, helper: { c: 5, r: 65, w: 3, h: 2 },
-  refinery: { c: 5, r: 56, w: 2, h: 2 }, launch: { c: 5, r: 51, w: 2, h: 2 },
+// Station strip (owner 2026-11-22 "neat layout"): one column of stations on the west edge of a clean deck plaza (KIND 1, a Grid Link
+// source). Every station = a standard 3 x 2 building plate at c 0-3 with its standard 3 x 2 pad directly in front (c 3-6, facing the
+// field), one empty row between stations; the walkway c 6-9 stays clear. Order follows the flow, north to south: Sell (Depot), Upgrades,
+// Tool Rack, Crew Bay, Helper Dock (Mercury), Refinery, then the rocket (4 x 4, the one exception) and the hub airlock at the south end.
+const PLAZA = { c: 0, r: 48, w: 9, h: 24 };
+const DEPOT = { c: 0, r: 48, w: 3, h: 2 }; // Depot plate (Grid Link source like the plaza); selling happens on its pad (SELL)
+const DEPOT_C = { x: DEPOT.c + DEPOT.w / 2, y: DEPOT.r + DEPOT.h / 2 };
+const PADZ = { // stand-on pads (3D: sell, panel or pay zone), each directly in front of its building
+  sell: { c: 3, r: 48, w: 3, h: 2 }, terminal: { c: 3, r: 51, w: 3, h: 2 }, tool: { c: 3, r: 54, w: 3, h: 2 }, crew: { c: 3, r: 57, w: 3, h: 2 },
+  helper: { c: 3, r: 60, w: 3, h: 2 }, refinery: { c: 3, r: 63, w: 3, h: 2 }, launch: { c: 4, r: 67, w: 3, h: 2 },
 };
+const SELL = PADZ.sell, SELL_C = { x: SELL.c + SELL.w / 2, y: SELL.r + SELL.h / 2 }; // standing on the Sell pad for sellDwellSec sells
 const BLDG = { // building plates; the building is solid inside its plate (inset 0.15)
-  terminal: { c: 1, r: 55, w: 3, h: 1 }, rack: { c: 1, r: 70, w: 3, h: 1 }, hangar: { c: 5, r: 70, w: 3, h: 2 },
-  refinery: { c: 5, r: 54, w: 2, h: 2 }, launch: { c: 1, r: 50, w: 4, h: 4 }, // launch: the full-scale rocket stands on this 4 x 4 plate
-  hub: { c: 0, r: 63, w: 2, h: 3 }, // Moon Station airlock: the dome sits off-map to the west, its tube opens onto the deck here
+  terminal: { c: 0, r: 51, w: 3, h: 2 }, rack: { c: 0, r: 54, w: 3, h: 2 }, hangar: { c: 0, r: 57, w: 3, h: 2 }, dock: { c: 0, r: 60, w: 3, h: 2 },
+  refinery: { c: 0, r: 63, w: 3, h: 2 }, launch: { c: 0, r: 66, w: 4, h: 4 }, // launch: the full-scale rocket stands on this 4 x 4 plate
+  hub: { c: 0, r: 70, w: 2, h: 2 }, // Moon Station airlock: the dome sits off-map to the west, its tube opens onto the deck here
 };
 // gate pads straddle the border of the sector they open (half on each side; the player stands on the open half)
 const PADS = [null, { c: 23, r: 57, w: 2, h: 2 }, { c: 10, r: 47, w: 2, h: 2 }, { c: 23, r: 34, w: 2, h: 2 }, { c: 10, r: 23, w: 2, h: 2 }, { c: 23, r: 10, w: 2, h: 2 }];
@@ -109,7 +111,7 @@ for (let t = 0; ROCKS.length < 18 && t < 4000; t++) {
   ROCKS.push({ c, r, x: c + 0.5, y: r + 0.5, rad: 0.36 + ((h >>> 20) & 7) * 0.012 });
 }
 const inset = (b, m) => ({ x0: b.c + m, y0: b.r + m, x1: b.c + b.w - m, y1: b.r + b.h - m });
-const SOLIDS = [inset(DEPOT, 0.45), ...Object.values(BLDG).map(b => inset(b, 0.15))];
+const SOLIDS = [inset(DEPOT, 0.15), ...Object.values(BLDG).map(b => inset(b, 0.15))];
 for (let i = 0; i < N; i++) { const c = i % C, r = (i / C) | 0; SEC[i] = sectorOf(c, r); }
 const markRect = (b, k) => { for (let r = b.r; r < b.r + b.h; r++) for (let c = b.c; c < b.c + b.w; c++) KIND[r * C + c] = k; };
 markRect(PLAZA, 1); [...Object.values(PADZ), ...Object.values(BLDG), ...PADS.slice(1)].forEach(b => markRect(b, 2)); markRect(DEPOT, 1);
@@ -166,7 +168,7 @@ function buy(S, id) {
   if (UPS.includes(id)) { S.up[id]++; ev(S, 'upgrade_buy', { id, lv: S.up[id], cost }); }
   else if (id === 'tool') { S.tool++; S.tele.tierAt[S.tool] = S.t; fxConfetti(S); sfx(S, 'tool'); ev(S, 'tool_buy', { tier: S.tool + 1, id: toolDef(S).id, cost }); }
   else if (id === 'keeper') { S.keepers.push({ x: DEPOT_C.x, y: DEPOT.r - 0.6, target: -1, work: 0, sector: -1, id: S.keepers.length }); S.tele.keeperAt[S.keepers.length] = S.t; sfx(S, 'keeper'); ev(S, 'keeper_hire', { n: S.keepers.length, cost }); }
-  else if (id === 'helper') { S.helpers.push({ x: DEPOT_C.x + 3, y: DEPOT.r + 5, target: -1, work: 0, kg: 0, id: S.helpers.length }); S.tele.helperAt[S.helpers.length] = S.t; sfx(S, 'keeper'); ev(S, 'helper_hire', { n: S.helpers.length, cost }); }
+  else if (id === 'helper') { S.helpers.push({ x: PADZ.helper.c + 1.5, y: PADZ.helper.r + 1, target: -1, work: 0, kg: 0, id: S.helpers.length }); S.tele.helperAt[S.helpers.length] = S.t; sfx(S, 'keeper'); ev(S, 'helper_hire', { n: S.helpers.length, cost }); }
   return true;
 }
 function unlockGate(S, k) {
@@ -182,7 +184,7 @@ function sellKg(S, kg) { // player sale or a Helper's drop-off: Fuel share to th
   const cash = (kg - fuelKg) * S.cfg.dust.pricePerKg * payoutMult(S);
   S.cash += cash; S.earned += cash; bin(S).sell += cash;
   if (S.tele.firstSell == null) S.tele.firstSell = S.t;
-  addText(S, DEPOT_C.x, DEPOT.r - 0.5, '+$' + fmt(cash) + (fuelKg > 0 ? '  +' + fuelKg.toFixed(1) + ' Fuel' : ''), '#FFD45E');
+  addText(S, SELL_C.x, SELL.r - 0.5, '+$' + fmt(cash) + (fuelKg > 0 ? '  +' + fuelKg.toFixed(1) + ' Fuel' : ''), '#FFD45E');
   sfx(S, 'sell');
 }
 function launch(S) {
@@ -207,7 +209,7 @@ function newGame(cfg, keep = {}) {
     dirt: new Float32Array(N), ever: new Uint8Array(N), hard: new Uint8Array(N), hardT: 0, stormOpen: false, foot: new Int32Array(N), footId: 1, popAt: new Float32Array(N).fill(-9), shineUntil: new Float32Array(N), stormAt: new Float32Array(N).fill(-9),
     linked: new Uint8Array(N), dist: new Int16Array(N), par: new Int32Array(N).fill(-1), q: new Int32Array(N),
     unlocked: [true, false, false, false, false, false], payFlow: false, gatePaid: 0, litCount: 0, everCount: 0, stormed: 0, linkedCount: 0, rate: 0, linkT: 0,
-    player: { x: DEPOT.c + DEPOT.w + 1.5, y: DEPOT.r + 2, tc: -1, tr: -1, face: -Math.PI / 2, moving: false },
+    player: { x: SELL.c + SELL.w + 1.5, y: SELL_C.y + 1, tc: -1, tr: -1, face: -Math.PI / 2, moving: false },
     keepers: [], helpers: [], crewOpen: false, storm: { phase: 'idle', next: cfg.storm.firstStormAtSec, count: 0, targets: [], ti: 0, front: 0, dir: 1, r0: 0 },
     chain: 0, lastLitT: -9, lastTone: -9, blocked: -9, milestone: 0, zoomAt: -99, fx: [], popup: null, sfxFn: null,
     tele: { firstUpgrade: null, firstLit: null, firstSell: null, tierAt: {}, keeperAt: {}, helperAt: {}, gateAt: {}, launchAt: null, min: [], upK3: [0, 0], upK0: [0, 0], storms: 0 },
@@ -417,7 +419,7 @@ function pickHelperTarget(S, h) { // nearest fresh (never Lit) dirty tile in ope
     if (bi >= 0 || !avoid) return bi; }
 }
 function stepHelpers(S, dt) {
-  const hc = S.cfg.helper, home = { x: DEPOT.c + DEPOT.w + 0.6, y: DEPOT_C.y };
+  const hc = S.cfg.helper, home = SELL_C;
   for (const h of S.helpers) {
     const full = h.kg >= hc.capKg - 1e-9;
     if (!full && h.target >= 0 && S.dirt[h.target] <= 0) { h.target = -1; h.retry = 0; }
@@ -537,7 +539,7 @@ function steer(S, B, mv) {
 function botMove(S, B) { B.stalls ??= 0; return steer(S, B, botMove0(S, B)); }
 function botMove0(S, B) {
   const p = S.player;
-  if (S.can >= capKg(S) - 1e-6 || S.t - S.blocked < 0.3) { B.tile = -1; return toward(p, DEPOT_C.x, DEPOT_C.y); }
+  if (S.can >= capKg(S) - 1e-6 || S.t - S.blocked < 0.3) { B.tile = -1; return toward(p, SELL_C.x, SELL_C.y); }
   const g = nextGate(S);
   if (g > 0 && S.cash >= gateCost(S, g) && (B.cleanFrac >= 0.85 || B.noDirty)) return toward(p, PADS[g].c + 1, PADS[g].r + 1);
   // human-like strokes: walk onto the target tile's row beside it, then sweep back and forth along the row so the tool head
@@ -576,8 +578,8 @@ function botBuy(S, B) {
     const ups = UPS.filter(id => canBuy(S, id) && !(B.skipUps || []).includes(id)).sort((a, b) => B.upPick === 'cheap' ? costOf(S, a) - costOf(S, b) : upRank(S, a, B.upPick) - upRank(S, b, B.upPick) || costOf(S, a) - costOf(S, b));
     if (!ups.length) break;
     const c = costOf(S, ups[0]);
-    if (save < 1e12 && S.cash - c < save && c > save * B.upgradeShare) break;
-    if (c > S.cash * 0.5) break;
+    if (save < 1e12 && S.cash - c < save && c > save * B.upgradeShare && S.tele.firstUpgrade != null) break;
+    if (c > S.cash * (S.tele.firstUpgrade == null ? 1 : 0.5)) break; // a player buys the first upgrade as soon as the first sale pays for it
     buy(S, ups[0]);
   }
   return null;
@@ -663,14 +665,14 @@ function selfTest() {
   // collision: walking into the Depot stops at its wall (still inside the sell rim); the tool head stops at a rock
   const Q = newGame(clone(CONFIG), { headless: true });
   const rk = ROCKS[0]; Q.player.x = rk.x - 1; Q.player.y = rk.y; Q.player.face = 0;
-  out.solidsBlock = Q.player.x > rk.x - 1.01 && headPos(Q).x <= rk.x - rk.rad + 1e-9 && (() => { const Z = newGame(clone(CONFIG), { headless: true }); Z.player.x = DEPOT.c + DEPOT.w + 1.5; Z.player.y = DEPOT.r + 2; Z.can = 1; for (let k = 0; k < 40; k++) step(Z, 0.05, { x: -1, y: 0 }); return Z.player.x < SELL.c + SELL.w && Z.player.x > DEPOT.c + DEPOT.w - 0.45 && Z.tele.firstSell !== null; })(); // stopped at the wall and sold there
-  // dwell: walking straight through the gate pad or the sell rim triggers nothing; standing still fires after dwellSec / sellDwellSec
+  out.solidsBlock = Q.player.x > rk.x - 1.01 && headPos(Q).x <= rk.x - rk.rad + 1e-9 && (() => { const Z = newGame(clone(CONFIG), { headless: true }); Z.player.x = SELL.c + SELL.w + 1.5; Z.player.y = SELL_C.y; Z.can = 1; for (let k = 0; k < 40; k++) step(Z, 0.05, { x: -1, y: 0 }); return Z.player.x < SELL.c + 0.6 && Z.player.x > DEPOT.c + DEPOT.w - 0.15 && Z.tele.firstSell !== null; })(); // stopped at the Depot wall, sold on its pad
+  // dwell: walking straight through the gate pad triggers nothing, a short stop on the Sell pad neither; standing still fires after dwellSec / sellDwellSec
   const Dw = newGame(clone(CONFIG), { headless: true }), g1 = PADS[1]; Dw.cash = 1e4; Dw.player.x = g1.c + 0.6; Dw.player.y = g1.r - 1.2;
   for (let k = 0; k < 20; k++) step(Dw, 0.05, { x: 0, y: 1 }); const passGate = !Dw.unlocked[1] && Dw.player.y > g1.r + g1.h;
   Dw.player.x = g1.c + 0.6; Dw.player.y = g1.r + 1; for (let k = 0; k < 11; k++) step(Dw, 0.05, null); const early = !Dw.unlocked[1];
   for (let k = 0; k < 2; k++) step(Dw, 0.05, null);
-  const Ds = newGame(clone(CONFIG), { headless: true }); Ds.can = 1; Ds.player.x = SELL.c + SELL.w - 0.2; Ds.player.y = SELL.r - 1; for (let k = 0; k < 6; k++) step(Ds, 0.05, { x: 0, y: 1 }); for (let k = 0; k < 6; k++) step(Ds, 0.05, { x: 1, y: 0 });
-  out.dwell = passGate && early && Dw.unlocked[1] && Ds.can >= 1 && Ds.tele.firstSell === null;
+  const Ds = newGame(clone(CONFIG), { headless: true }); Ds.can = 1; Ds.player.x = SELL_C.x; Ds.player.y = SELL_C.y; for (let k = 0; k < 5; k++) step(Ds, 0.05, null); const notYet = Ds.can >= 1; for (let k = 0; k < 3; k++) step(Ds, 0.05, null);
+  out.dwell = passGate && early && Dw.unlocked[1] && notYet && Ds.can === 0 && Ds.tele.firstSell !== null;
   // balancing: effective speed never exceeds the tier base * (1 + cap), every branch stops at its max level, Width stays at +2
   const Sp = newGame(clone(CONFIG), { headless: true }), UG = Sp.cfg.upgrades; let capOk = true;
   for (let k = 0; k < Sp.cfg.tools.length; k++) for (const lv of [0, UG.speed.max, 99]) { Sp.tool = k; Sp.up.speed = lv; capOk = capOk && playerSpeed(Sp) <= Sp.cfg.player.speed * Sp.cfg.tools[k].speedMult * (1 + UG.speed.cap) + 1e-9; }
@@ -682,9 +684,12 @@ function selfTest() {
   const footOk = SOLIDS.every(b => b.x0 >= 0 && b.y0 >= 0 && b.x1 <= C && b.y1 <= R && KIND[Math.floor((b.y0 + b.y1) / 2) * C + Math.floor((b.x0 + b.x1) / 2)] !== 0);
   let cellsOk = true; for (let i = 0; i < N; i++) { const x = i % C + 0.5, y = ((i / C) | 0) + 0.5; if (blocked(x, y, 0) && !(KIND[i] === 2 || KIND[i] === 3 || inRectT(x, y, DEPOT))) cellsOk = false; }
   out.noStrayBlockers = footOk && cellsOk && ROCKS.every(k => KIND[k.r * C + k.c] === 3);
-  // station hub airlock: clean foundation, solid; walking down column 1 from the north stops at its wall
-  const Hb = BLDG.hub, Hw = newGame(clone(CONFIG), { headless: true }); Hw.player.x = 1; Hw.player.y = Hb.r - 1.5; for (let k = 0; k < 40; k++) step(Hw, 0.05, { x: 0, y: 1 });
-  out.hubSolid = KIND[(Hb.r + 1) * C + Hb.c] === 2 && blocked(Hb.c + 1, Hb.r + 1.5, 0.3) && Hw.player.y < Hb.r + 0.15 && Hw.player.y > Hb.r - 1;
+  // station hub airlock: clean foundation, solid; walking west along its row stops at its wall
+  const Hb = BLDG.hub, Hw = newGame(clone(CONFIG), { headless: true }); Hw.player.x = Hb.c + Hb.w + 2; Hw.player.y = Hb.r + 1; for (let k = 0; k < 40; k++) step(Hw, 0.05, { x: -1, y: 0 });
+  out.hubSolid = KIND[(Hb.r + 1) * C + Hb.c] === 2 && blocked(Hb.c + 1, Hb.r + 1, 0.3) && Hw.player.x > Hb.c + Hb.w - 0.15 && Hw.player.x < Hb.c + Hb.w + 0.5;
+  // neat strip: every station building has its pad directly in front (same rows, touching its east edge), one standard size
+  const pair = [['terminal', 'terminal'], ['rack', 'tool'], ['hangar', 'crew'], ['dock', 'helper'], ['refinery', 'refinery']].map(([b, z]) => [BLDG[b], PADZ[z]]).concat([[DEPOT, SELL]]);
+  out.neatStrip = pair.every(([b, z]) => b.w === 3 && b.h === 2 && z.w === 3 && z.h === 2 && z.c === b.c + b.w && z.r === b.r) && PADZ.launch.c === BLDG.launch.c + BLDG.launch.w;
   // a toothbrush tile needs exactly 3 passes; a storm tile drops to dirtAfter; a Keeper re-lights it
   const T = newGame(clone(CONFIG), { headless: true }); const i0 = 60 * C + 15;
   passTile(T, i0, 1 / 3, true); passTile(T, i0, 1 / 3, true); const before = T.dirt[i0] > 0; passTile(T, i0, 1 / 3, true);
@@ -742,5 +747,5 @@ function selfTest() {
   out.pass = Object.values(out).every(v => v === true);
   return out;
 }
-globalThis.SP = { EVENT_SCHEMA, serialize, deserialize, cfgHash, planetDef, nextGate, stepHarden, upBonus, playerSpeed, UPS, PLAZA, dwell, SELL, headPos, blocked, PADZ, BLDG, ROCKS, SOLIDS, KIND, SWEEPABLE, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
+globalThis.SP = { SELL_C, EVENT_SCHEMA, serialize, deserialize, cfgHash, planetDef, nextGate, stepHarden, upBonus, playerSpeed, UPS, PLAZA, dwell, SELL, headPos, blocked, PADZ, BLDG, ROCKS, SOLIDS, KIND, SWEEPABLE, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
 

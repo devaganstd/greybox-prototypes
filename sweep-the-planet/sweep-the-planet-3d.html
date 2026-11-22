@@ -31,7 +31,7 @@
 <div id="cheat"></div>
 <div id="err"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=pass3"></script>
+<script src="sweep-sim.js?v=pass4b"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -53,7 +53,7 @@ const ZONES = {
   refinery: Object.assign({ kind: 'panel', label: 'REFINERY', bg: PAL.purple }, PADZ.refinery),
   launch: Object.assign({ kind: 'panel', label: 'LAUNCH', bg: PAL.orange }, PADZ.launch),
 };
-const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 21, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.45 };
+const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 21, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.8 };
 const errBox = document.getElementById('err');
 addEventListener('error', e => { errBox.style.display = 'block'; errBox.textContent += (e.message || e) + '\n'; });
 
@@ -232,7 +232,7 @@ scene.add(new THREE.Mesh(groundGeo, groundMat));
 const terrainMat = new THREE.ShaderMaterial({ uniforms: { uSun: sunU, uReg: regU, uAlarm: alarmU },
   vertexShader: 'varying vec3 vW; varying vec3 vN; void main(){ vW = (modelMatrix * vec4(position, 1.0)).xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0); }',
   fragmentShader: 'precision highp float; varying vec3 vW; varying vec3 vN;' + REGOLITH_GLSL + ' void main(){ gl_FragColor = vec4(alarm(regolith(vW.xz, normalize(vN))), 1.0); }' });
-const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 2, z: 64.5 }, INTRO_F = { x: 2, z: 62 }; // hub dome centre (world); camera focus near the base
+const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 5, z: 59 }, INTRO_F = { x: 0.5, z: 58.5 }, K_EST = Math.log(52 / 21) / Math.log(175 / 21); // hub dome centre (world); camera focus near the base
 const MOON_R = 150, MOON_C = new THREE.Vector3(C / 2, -0.4 - MOON_R, R / 2);
 const CRATERS = [[-14, 20, 5], [62, 8, 7], [58, 60, 4.5], [-10, 66, 6], [20, -12, 6], [70, 90, 8], [-22, 45, 4], [30, 86, 5], [80, 35, 5], [5, 95, 7], [-40, -10, 9], [95, 70, 9]];
 function terrainH(x, z) {
@@ -284,15 +284,15 @@ const refinery = bldg(BLDG.refinery);
 const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 2.0, 16), toon(0xc9c2d6, { transparent: true, opacity: 0.45 }, false)); tank.position.y = 1.3; refinery.add(tank);
 const fuelFill = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.52, 1, 16), toon(0xb48cff)); refinery.add(fuelFill);
 const launchPad = bldg(BLDG.launch), rocket = new THREE.Group(); launchPad.add(rocket);
-{ const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.38, 1.4, 12), lam(0xf7f2e8)); body.position.y = 0.9; rocket.add(body); }
-let rocketNose = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.7, 12), lam(0xff8a3d)); rocketNose.position.y = 1.95; rocket.add(rocketNose);
+{ const body = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.25, 5.6, 16), lam(0xf7f2e8)); body.position.y = 3.6; rocket.add(body); }
+let rocketNose = new THREE.Mesh(new THREE.ConeGeometry(1.2, 2.6, 16), lam(0xff8a3d)); rocketNose.position.y = 7.7; rocket.add(rocketNose);
 const terminal = bldg(BLDG.terminal, -Math.PI / 2); terminal.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.2, 0.9), lam(0xf3e6cf))).children[0].position.y = 0.6;
 const rack = bldg(BLDG.rack, Math.PI / 2); rack.add(new THREE.Mesh(new THREE.BoxGeometry(0.25, 1.0, 2.4), lam(0xc9c2d6))).children[0].position.y = 0.5;
 // Moon Station hub: dome off-map to the west, airlock tube onto the deck (sim BLDG.hub is the solid, clean footprint)
 const hub = new THREE.Group(); hub.position.set(BLDG.hub.c, 0, HUB_W.z); scene.add(hub); blob(scene, 6.4, 6.4, HUB_W.x, HUB_W.z);
 { const d = new THREE.Mesh(new THREE.SphereGeometry(2.45, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), lam(0xf3e6cf)); d.scale.y = 0.78; d.position.set(HUB_W.x - BLDG.hub.c, 0.3, 0); hub.add(d);
   const t = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 3.4, 12), lam(0xc9c2d6)); t.rotation.z = Math.PI / 2; t.position.set(-0.55, 0.75, 0); hub.add(t); }
-const crewBay = bldg(BLDG.hangar, -Math.PI / 2); // hangar appears after the first storm (Keepers unlock then in the sim)
+const crewBay = bldg(BLDG.hangar, Math.PI / 2); // hangar appears after the first storm (Keepers unlock then in the sim)
 crewBay.add(new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.3, 2.6), lam(0xf3e6cf))).children[0].position.y = 0.65;
 // floor pads: rounded ring (pad colour), inner glow when stood on, bright arc = paid progress for pay zones
 function ringMat(hex) {
@@ -364,7 +364,7 @@ const toonCache = new Map();
 function toonOf(m) {
   const key = m.name + ':' + m.color.getHexString(); if (toonCache.has(key)) return toonCache.get(key);
   const t = m.name === 'visor' ? new THREE.MeshPhongMaterial({ color: m.color, specular: 0xb7c4e0, shininess: 90 })
-    : m.name === 'glow' ? new THREE.MeshBasicMaterial({ color: m.color }) : toon(m.color);
+    : m.name.startsWith('glow') ? new THREE.MeshBasicMaterial({ color: m.color }) : toon(m.color);
   t.name = m.name; toonCache.set(key, t); return t;
 }
 function useAssets(gltf) {
@@ -390,7 +390,7 @@ function useAssets(gltf) {
   SP.assets = 'glb';
 }
 SP.assets = 'loading';
-new GLTFLoader().load('assets/sweep-assets.glb?v=pass3', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+new GLTFLoader().load('assets/sweep-assets.glb?v=pass4', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
 // code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
 const anim = { squash: 0, lastCan: 0, sweepT: 0, tierPop: 0, lastTool: 0 };
 function animatePlayer(S, p, dt) {
@@ -421,6 +421,49 @@ function stepPuffs(S, dt) {
     else { f.x += f.vx * dt; f.y += f.vy * dt; f.z += f.vz * dt; f.vy -= 2.5 * dt; f.vx *= 0.92; f.vz *= 0.92; } }
   puffs.forEach((f, i) => puffPos.set([f.x, Math.max(0.05, f.y), f.z], i * 3)); puffGeo.setDrawRange(0, puffs.length); puffGeo.attributes.position.needsUpdate = true;
 }
+// ----- light VFX (subtle): spark pool (additive) for tier-up bursts, Keeper tile pops and the hover trail; machine exhaust and
+// robot footstep dust reuse the puff pool; a downdraft ring under the hover; the dwell ring under the feet; the sell guide chevrons
+const SPK_MAX = 320, spkPos = new Float32Array(SPK_MAX * 3), spkCol = new Float32Array(SPK_MAX * 3), sparks = [], spkGeo = new THREE.BufferGeometry();
+spkGeo.setAttribute('position', new THREE.BufferAttribute(spkPos, 3)); spkGeo.setAttribute('color', new THREE.BufferAttribute(spkCol, 3));
+const spkPts = new THREE.Points(spkGeo, new THREE.PointsMaterial({ map: softTex([[0, 1], [0.35, 0.55], [1, 0]]), size: 0.24, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+spkPts.frustumCulled = false; scene.add(spkPts);
+function spark(x, y, z, vx, vy, vz, life, hex, g = 4) { if (sparks.length < SPK_MAX) sparks.push({ x, y, z, vx, vy, vz, life, t: 0, c: new THREE.Color(hex), g }); }
+function burst(x, y, z, n, hex, sp = 2.5, life = 0.7) { for (let i = 0; i < n; i++) { const a = Math.random() * 6.283, u = 0.3 + 0.7 * Math.random(); spark(x, y, z, Math.cos(a) * sp * u, sp * (0.5 + Math.random()), Math.sin(a) * sp * u, life * (0.6 + 0.4 * Math.random()), hex); } }
+function puff(x, y, z, vx, vy, vz, life) { if (puffs.length < PUFF_MAX) puffs.push({ x, y, z, vx, vy, vz, life, t: 0, suck: false }); }
+const downRing = new THREE.Mesh(new THREE.RingGeometry(0.55, 0.68, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xd7b8ff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
+scene.add(downRing);
+const dwellRing = padMesh(1.3, 1.3, 0xfff6e8); dwellRing.position.y = 0.04; dwellRing.renderOrder = 3; scene.add(dwellRing);
+const CHEV_N = 9, chevMesh = new THREE.InstancedMesh(new THREE.ShapeGeometry(new THREE.Shape([new THREE.Vector2(0.28, 0), new THREE.Vector2(-0.18, 0.26), new THREE.Vector2(-0.06, 0), new THREE.Vector2(-0.18, -0.26)])).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0xffc857, transparent: true, opacity: 0.75, depthWrite: false }), CHEV_N);
+chevMesh.frustumCulled = false; chevMesh.renderOrder = 3; scene.add(chevMesh);
+const fxState = { exT: 0, stepS: 0, tgt: [] };
+function stepFx(S, dt) {
+  const p = S.player, w = toolWidth(S), fx = Math.cos(p.face), fz = Math.sin(p.face), lx = -fz, lz = fx, sweeping = anim.sweepT > 0 && p.moving;
+  if (S.tool > (fxState.tool ?? S.tool)) burst(p.x, 1.2, p.y, 46, 0xffd36b, 3.2, 0.9);                       // tier-up sparkle burst
+  fxState.tool = S.tool;
+  if (sweeping && w > 1) { const hp = headPos(S); for (let k = 0; k < Math.min(4, S.tool); k++) { const o = (Math.random() - 0.5) * w; puff(hp.x + lx * o, 0.08, hp.y + lz * o, (Math.random() - 0.5) * 1.2, 0.5 + Math.random(), (Math.random() - 0.5) * 1.2, 0.5); } } // wider head, wider dust
+  if ((S.tool === 4 || S.tool === 5) && p.moving && (fxState.exT -= dt) <= 0) {                                 // machine exhaust puffs
+    fxState.exT = 0.14; const back = S.tool === 5 ? -0.45 : -0.75, side = S.tool === 5 ? 0.36 : 0.2, h = S.tool === 5 ? 1.25 : 0.8;
+    puff(p.x + fx * back + lx * side, h, p.y + fz * back + lz * side, -fx * 0.3, 0.8, -fz * 0.3, 0.6);
+    if (S.tool === 4 && sweeping && Math.random() < 0.3) { const hp = headPos(S); spark(hp.x, 0.1, hp.y, (Math.random() - 0.5), 1.2, (Math.random() - 0.5), 0.3, 0xffe0a0); }
+  }
+  if (S.tool === 6 && p.moving) { const st = Math.sign(Math.sin(S.t * 7)); if (st !== fxState.stepS) { fxState.stepS = st; const o = st * 0.42; for (let k = 0; k < 5; k++) puff(p.x + lx * o + fx * 0.1, 0.06, p.y + lz * o + fz * 0.1, (Math.random() - 0.5) * 1.6, 0.3 + Math.random() * 0.4, (Math.random() - 0.5) * 1.6, 0.45); } } // robot footfalls
+  const hov = S.tool === 7; downRing.visible = hov;
+  if (hov) { const k = (S.t * 1.6) % 1; downRing.position.set(p.x, 0.05, p.y); downRing.scale.setScalar(0.8 + k * 0.9); downRing.material.opacity = 0.35 * (1 - k);
+    if (p.moving) spark(p.x - fx * 0.7 + (Math.random() - 0.5) * 0.5, 0.3, p.y - fz * 0.7 + (Math.random() - 0.5) * 0.5, 0, 0.1, 0, 0.6, 0xb48cff, 0); } // glow trail
+  S.keepers.forEach((k, i) => { const old = fxState.tgt[i]; if (old != null && old >= 0 && old !== k.target && S.dirt[old] === 0) burst(old % C + 0.5, 0.4, ((old / C) | 0) + 0.5, 8, 0x8ee3b5, 1.6, 0.45); fxState.tgt[i] = k.target; }); // Keeper tile pop
+  for (let i = sparks.length - 1; i >= 0; i--) { const f = sparks[i]; f.t += dt; if (f.t >= f.life) { sparks.splice(i, 1); continue; } f.x += f.vx * dt; f.y = Math.max(0.05, f.y + f.vy * dt); f.z += f.vz * dt; f.vy -= f.g * dt; f.vx *= 0.96; f.vz *= 0.96; }
+  sparks.forEach((f, i) => { const a = 1 - f.t / f.life; spkPos.set([f.x, f.y, f.z], i * 3); spkCol.set([f.c.r * a, f.c.g * a, f.c.b * a], i * 3); });
+  spkGeo.setDrawRange(0, sparks.length); spkGeo.attributes.position.needsUpdate = spkGeo.attributes.color.needsUpdate = true;
+  // dwell ring under the feet: fills while standing on any pad / pay zone / panel / the sell rim, hidden once it fired
+  const rp = S.ringP || 0; dwellRing.visible = rp > 0.001 && rp < 0.999; dwellRing.position.x = p.x; dwellRing.position.z = p.y; dwellRing.material.uniforms.uProg.value = rp; dwellRing.material.uniforms.uOn.value = 0.4;
+  // sell guide: chevrons from the player toward the Depot's field-side wall while the canister is full
+  const full = S.can >= capKg(S) - 1e-6 && !inRectT(p.x, p.y, SELL), tx = DEPOT.c + DEPOT.w + 0.3, tz = DEPOT.r + DEPOT.h / 2, dx = tx - p.x, dz = tz - p.y, d = Math.hypot(dx, dz);
+  chevMesh.visible = full && d > 1.5;
+  if (chevMesh.visible) { const ux = dx / d, uz = dz / d, off = (S.t * 1.6) % 1.1; tmpQ.setFromEuler(new THREE.Euler(0, -Math.atan2(uz, ux), 0));
+    for (let i = 0; i < CHEV_N; i++) { const s = 1.0 + off + i * 1.1, a = s < d - 0.6 ? Math.min(1, (d - 0.6 - s) / 1.2) : 0; chevMesh.setMatrixAt(i, tmpM.compose(tmpV.set(p.x + ux * s, 0.05, p.y + uz * s), tmpQ, tmpS.setScalar(a * Math.min(1, s / 1.6)))); }
+    chevMesh.instanceMatrix.needsUpdate = true; }
+}
 // storm warning: rotating red beacons (lamp + light cone + point light) on the Depot, the Refinery and deck masts on the hull rim
 const beacons = [], beamMat = new THREE.MeshBasicMaterial({ color: 0xff3a2a, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
 const lampOff = new THREE.MeshBasicMaterial({ color: 0x6b2a2a }), lampOn = new THREE.MeshBasicMaterial({ color: 0xff4a3a });
@@ -434,7 +477,7 @@ function beacon(x, y, z, mast, light) {
   beacons.push({ lamp, pivot, pl }); return g;
 }
 beacon(DEPOT.c + 0.7, 2.0, DEPOT.r + 0.7, false, true); beacon(BLDG.refinery.c + 1, 2.85, BLDG.refinery.r + 1, false, true);
-for (const [x, z] of [[-0.6, 52], [-0.6, 68], [48.6, 58], [12, 72.6], [36, 72.6]]) beacon(x, 2.2, z, true, false);
+for (const [x, z] of [[-0.6, 52], [-0.6, 71.4], [48.6, 58], [12, 72.6], [36, 72.6]]) beacon(x, 2.2, z, true, false);
 function stepAlarm(S) {
   const st = S.storm, warn = st.phase === 'warn', on = warn ? 1 : 0, pulse = 0.5 + 0.5 * Math.sin(S.t * 9);
   for (const b of beacons) { b.pivot.visible = warn; b.pivot.rotation.y = S.t * 5; b.lamp.material = warn && pulse > 0.3 ? lampOn : lampOff; if (b.pl) b.pl.intensity = on * (1.5 + 2.5 * pulse); }
@@ -486,28 +529,29 @@ function writeTiles(S) {
 }
 function zoomK(S) {
   const f = S.cfg.feel; let k = 0;
-  if (S.t < f.introSec) k = S.t < 1.2 ? 1 : 1 - ease(clamp((S.t - 1.2) / (f.introSec - 1.2), 0, 1));
+  // intro: planet, descend to an establishing shot of the whole base (rocket, hub, Depot) held ~1.2 s, then drop to the player
+  if (S.t < f.introSec) k = S.t < 1.2 ? 1 : S.t < 2.2 ? lerp(1, K_EST, ease((S.t - 1.2) / 1.0)) : S.t < 3.4 ? K_EST : K_EST * (1 - ease(clamp((S.t - 3.4) / (f.introSec - 3.4), 0, 1)));
   const za = S.t - S.zoomAt;
   if (za >= 0 && za < f.zoomOutSec) k = Math.max(k, za < 0.5 ? ease(za / 0.5) : za > f.zoomOutSec - 0.5 ? ease((f.zoomOutSec - za) / 0.5) : 1);
   return k;
 }
 let shake = 0;
 function updateWorld(S, realDt) {
-  const p = S.player, k = zoomK(S), yaw = CAM.yawDeg * Math.PI / 180, pitch = lerp(CAM.pitchDeg, CAM.planetPitchDeg, k) * Math.PI / 180;
+  const p = S.player, k = zoomK(S), yaw = CAM.yawDeg * Math.PI / 180, pitch = lerp(CAM.pitchDeg, CAM.planetPitchDeg, S.t < S.cfg.feel.introSec ? clamp((k - K_EST) / (1 - K_EST), 0, 1) : k) * Math.PI / 180; // the establishing shot keeps the play pitch
   groundMat.uniforms.uTime.value = S.t;
   syncMask(S);
   writeTiles(S);
   // camera: smooth follow, zoom-out with tool width, pull back to the planet on intro / every 10% Moon
   const a = 1 - Math.exp(-CAM.follow * realDt);
   // near the base the camera leans toward the Depot + Moon Station hub so the start frame shows the station, not the map edge
-  const bw = CAM.baseBias * clamp(1 - Math.hypot(p.x - BASE_F.x, p.y - BASE_F.z) / 12, 0, 1), fx = p.x + (BASE_F.x - p.x) * bw, fz = p.y + (BASE_F.z - p.y) * bw;
+  const bw = CAM.baseBias * clamp(1 - Math.hypot(p.x - BASE_F.x, p.y - BASE_F.z) / 14, 0, 1), fx = p.x + (BASE_F.x - p.x) * bw, fz = p.y + (BASE_F.z - p.y) * bw;
   if (!camState.init) { camState.tx = fx; camState.tz = fz; camState.init = true; }
   const la = p.moving ? CAM.lookAhead : 0, b2 = 1 - Math.exp(-2.5 * realDt); // eased look-ahead in the walking direction
   camState.ax += (Math.cos(p.face) * la - camState.ax) * b2; camState.az += (Math.sin(p.face) * la - camState.az) * b2;
   camState.tx += (fx + camState.ax - camState.tx) * a; camState.tz += (fz + camState.az - camState.tz) * a;
   const baseD = CAM.dist * (1 + CAM.widthZoom * (toolWidth(S) - 1));
   camState.d += (baseD - camState.d) * a;
-  const d = Math.exp(lerp(Math.log(camState.d * (1 + 0.45 * Math.sin(Math.PI * clamp(1 - anim.tierPop / 1.2, 0, 1)) * (anim.tierPop > 0 ? 1 : 0))), Math.log(CAM.planetDist), k)), intro = S.t < S.cfg.feel.introSec, tx = lerp(camState.tx, intro ? INTRO_F.x : C / 2, k), tz = lerp(camState.tz, intro ? INTRO_F.z : R / 2, k); // the intro descends onto the station + base
+  const d = Math.exp(lerp(Math.log(camState.d * (1 + 0.45 * Math.sin(Math.PI * clamp(1 - anim.tierPop / 1.2, 0, 1)) * (anim.tierPop > 0 ? 1 : 0))), Math.log(CAM.planetDist), k)), intro = S.t < S.cfg.feel.introSec, ki = intro ? clamp(k / K_EST, 0, 1) : k, tx = lerp(camState.tx, intro ? INTRO_F.x : C / 2, ki), tz = lerp(camState.tz, intro ? INTRO_F.z : R / 2, ki); // the intro descends onto the station + base
   const st = S.storm; if (st.phase === 'blow' && st.front > -2 && st.front < C + 2) shake = st.count ? 0.06 : 0.03; shake = Math.max(0, shake - realDt * 0.5);
   const sh = shake * shake * 2;
   camera.position.set(tx + Math.sin(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh, Math.sin(pitch) * d, tz + Math.cos(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh);
@@ -551,7 +595,7 @@ function updateWorld(S, realDt) {
     U.uProg.value = paid;
     if (z.pad.visible) z.label3d.userData.set(!ok ? (id === 'tool' ? 'MAX TOOL' : 'CREW FULL') : cost === 0 ? 'FREE' : (id === 'tool' ? pz.name(S) + ' ' : 'Keeper ') + '$' + fmt(cost - (S.zonePaid[id] || 0)), cost === 0 && ok ? PAL.mint : z.bg);
   }
-  stepFlows(realDt); stepPuffs(S, realDt);
+  stepFlows(realDt); stepPuffs(S, realDt); stepFx(S, realDt);
   stepAlarm(S);
   moon.visible = true;
 }
@@ -564,8 +608,10 @@ const PAYZ = {
   crew: { ok: S => costOf(S, 'keeper') != null, cost: S => costOf(S, 'keeper'), done: S => buy(S, 'keeper') },
 };
 function stepPayZones(S, dt) {
+  const ready = S.zoneReady || (S.zoneReady = {});
+  for (const [id, z] of Object.entries(ZONES)) ready[id] = dwell(S, 'z:' + id, (z.kind !== 'pay' || PAYZ[id].ok(S)) && inZone(S, z), dt, S.cfg.ui.dwellSec);
   for (const [id, pz] of Object.entries(PAYZ)) {
-    if (!pz.ok(S) || !inZone(S, ZONES[id])) continue;
+    if (!pz.ok(S) || !ready[id]) continue;
     const cost = pz.cost(S), paid = S.zonePaid[id] || 0, pay = Math.min(S.cash, cost * dt / S.cfg.ui.payZoneSec, cost - paid);
     S.cash -= pay; S.zonePaid[id] = paid + pay;
     if (S.zonePaid[id] >= cost - 1e-6) { S.cash += cost; S.zonePaid[id] = 0; pz.done(S); }
@@ -633,7 +679,7 @@ const SHEETS = {
   refinery: { h: 150, title: 'REFINERY: DUST TO FUEL', rows: FUEL_STEPS.map((v, i) => ({ id: 'fuel', v, x: 10 + i * 75, y: 62, w: 70, h: 46 })) },
   launch: { h: 160, title: 'LAUNCH PAD', rows: [{ id: 'launch', x: 95, y: 56, w: 200, h: 56 }] },
 };
-const activeSheet = S => !S.popup && Object.keys(SHEETS).find(id => inZone(S, ZONES[id]));
+const activeSheet = S => !S.popup && Object.keys(SHEETS).find(id => S.zoneReady && S.zoneReady[id] && inZone(S, ZONES[id]));
 const HUD_BTN = { shop: { x: 282, y: 8, w: 60, h: 44, label: 'SHOP' }, map: { x: 282, y: 58, w: 60, h: 24, label: 'MAP' } };
 let toast = null;
 ui.addEventListener('pointerdown', e => {
@@ -698,7 +744,7 @@ function drawSheet(S, sid) {
     if (sid === 'terminal') {
       const c = costOf(S, b.id), en = canBuy(S, b.id);
       ctx.fillStyle = PAL.plumHi; ctx.beginPath(); ctx.roundRect(x, y, b.w, b.h, 14); ctx.fill(); upIcon(b.id, x + 22, y + b.h / 2, PAL.teal);
-      ctx.textAlign = 'left'; ctx.fillStyle = PAL.cream; ctx.font = '800 13px system-ui'; ctx.fillText(LABEL[b.id] + '  Lv ' + S.up[b.id], x + 44, y + 18);
+      ctx.textAlign = 'left'; ctx.fillStyle = PAL.cream; ctx.font = '800 13px system-ui'; ctx.fillText(LABEL[b.id] + '  Lv ' + S.up[b.id] + '/' + S.cfg.upgrades[b.id].max, x + 44, y + 18);
       ctx.fillStyle = PAL.mute; ctx.font = '11px system-ui'; ctx.fillText(EFFECT[b.id], x + 44, y + 33);
       ctx.fillStyle = c == null ? PAL.plum : en ? PAL.yellow : '#4a4466'; ctx.beginPath(); ctx.roundRect(x + b.w - 110, y + 5, 102, b.h - 10, 15); ctx.fill();
       ctx.textAlign = 'center'; ctx.fillStyle = en ? PAL.plum : PAL.mute; ctx.font = 'bold 13px system-ui'; ctx.fillText(c == null ? 'MAX' : '$' + fmt(c), x + b.w - 59, y + 25);
@@ -880,9 +926,15 @@ function selfTest3d() {
   keys.w = true; const v = inputVec(); keys.w = false; const yaw = CAM.yawDeg * Math.PI / 180;
   // pay zones in this layer: tool tier bought after ui.payZoneSec on the rack; first Keeper free and instant at the Crew Bay
   const T = newGame(JSON.parse(JSON.stringify(CONFIG)), { headless: true }); T.zonePaid = {}; T.cash = T.cfg.tools[1].cost; T.player.x = ZONES.tool.c + 1; T.player.y = ZONES.tool.r + 1;
-  for (let i = 0; i < 10; i++) stepPayZones(T, 0.05); const toolHalf = T.tool === 0 && T.zonePaid.tool > 0;
+  for (let i = 0; i < 20; i++) stepPayZones(T, 0.05); const toolHalf = T.tool === 0 && T.zonePaid.tool > 0;
   for (let i = 0; i < 30; i++) stepPayZones(T, 0.05); r.toolPayZone = toolHalf && T.tool === 1 && Math.abs(T.cash) < 1e-6 && T.zonePaid.tool === 0;
-  T.crewOpen = true; T.player.x = ZONES.crew.c + 1; T.player.y = ZONES.crew.r + 1; stepPayZones(T, 0.05); r.freeKeeper = T.keepers.length === 1;
+  T.crewOpen = true; T.player.x = ZONES.crew.c + 1; T.player.y = ZONES.crew.r + 1; stepPayZones(T, 0.05); const notYet = T.keepers.length === 0;
+  for (let i = 0; i < 12; i++) stepPayZones(T, 0.05); r.freeKeeper = notYet && T.keepers.length === 1;
+  // dwell: walking straight across the Upgrades pad never opens its panel; standing on it does
+  const Wk = newGame(JSON.parse(JSON.stringify(CONFIG)), { headless: true }), zt = ZONES.terminal; Wk.player.x = zt.c - 0.4; Wk.player.y = zt.r + 1.5; let opened = false;
+  for (let i = 0; i < 24; i++) { step(Wk, 0.05, { x: 1, y: 0 }); stepPayZones(Wk, 0.05); opened = opened || !!activeSheet(Wk); }
+  const crossed = Wk.player.x > zt.c + zt.w; Wk.player.x = zt.c + 1.5; for (let i = 0; i < 13; i++) { step(Wk, 0.05, null); stepPayZones(Wk, 0.05); }
+  r.dwellPanel = !opened && crossed && activeSheet(Wk) === 'terminal';
   if (ASSETS) r.hubAsset = ASSETS.has('hub');
   if (ASSETS) r.toolAssets = CONFIG.tools.every((t, k) => ASSETS.has('tool' + k) && (k < 4 || ASSETS.has('veh' + k)));
   r.padsOutsideDepot = Object.values(ZONES).every(z => z.c >= DEPOT.c + DEPOT.w || z.c + z.w <= DEPOT.c || z.r >= DEPOT.r + DEPOT.h || z.r + z.h <= DEPOT.r);

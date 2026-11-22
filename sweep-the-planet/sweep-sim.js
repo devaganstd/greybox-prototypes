@@ -8,7 +8,7 @@
 // a 100% clean tile is Lit and pays $/s while it stays clean; Dust Storms re-dust Lit tiles; Keeper Drones re-clean them.
 // ===== CONFIG: every tunable lives here (concept §13.2; values changed by greybox tuning are marked "tuned") =====
 const CONFIG = {
-  grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 800, 1700, 5000] }, // tuned (2026-11-22 tool ladder: 2000/6000 -> 1700/5000, launch 26-29 min) (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
+  grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 900, 1650, 5000] }, // tuned (2026-11-22 tool ladder: 2000/6000 -> 1700/5000; pass 4 base plaza on the left, longer sell trips: 1700 -> 1450; pass 4 balancing caps freed cash: 800/1450 -> 900/1650; launch 26-29 min) (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
   player: { speed: 5.4 /* tiles per second; 4.0 tile greybox, 4.8 fine dust mask, 5.4 with buildings and rocks to walk around */ },
   // pricePerKg: concept 1.0, 4.0 in the tile greybox, 4.5 with the fine dust mask, 5.0 with collision. sub = mask cells per tile side; a tile is Lit at
   // >= litCleanFrac clean cells; brushDepth = brush size along the facing; brushPad = brush a bit wider than `width` so strokes overlap.
@@ -23,18 +23,20 @@ const CONFIG = {
     { id: 'Mop', reach: 1.0, brush: 'round', width: 2, passes: 2, capKg: 15, speedMult: 1.0, cost: 45, shineMult: 1.25, shineSec: 60 },
     { id: 'Wide Mop', reach: 1.1, width: 3, passes: 1.5, capKg: 22, speedMult: 1.0, cost: 300 },
     { id: 'Push Broom', reach: 1.3, width: 4, passes: 1, capKg: 30, speedMult: 1.0, cost: 800 },
-    { id: 'Floor Scrubber', reach: 1.25, width: 5, passes: 1, capKg: 50, speedMult: 1.0, cost: 1400, turnRate: 3.5 },
-    { id: 'Ride-on Sweeper', reach: 1.5, width: 7, passes: 1, capKg: 80, speedMult: 1.05, cost: 5000, turnRate: 2.6, ride: 0.62, autoDumpSec: 30 },
-    { id: 'Sweeper Robot', reach: 1.8, width: 9, passes: 1, capKg: 120, speedMult: 1.0, cost: 12000, ride: 1.3, rocksPassable: true },
-    { id: 'Hover Sweeper', reach: 1.5, width: 11, passes: 1, capKg: 160, speedMult: 1.25, cost: 30000, ride: 0.55, rocksPassable: true },
+    { id: 'Floor Scrubber', reach: 1.25, width: 5, passes: 1, capKg: 50, speedMult: 1.0, speedUpScale: 0.6, cost: 1250 /* pass 4: 1400 -> 1250 */, turnRate: 3.5 },
+    { id: 'Ride-on Sweeper', reach: 1.5, width: 7, passes: 1, capKg: 80, speedMult: 1.05, speedUpScale: 0.6, cost: 5000, turnRate: 2.6, ride: 0.62, autoDumpSec: 30 },
+    { id: 'Sweeper Robot', reach: 1.8, width: 9, passes: 1, capKg: 120, speedMult: 1.0, speedUpScale: 0.6, cost: 12000, ride: 1.3, rocksPassable: true },
+    { id: 'Hover Sweeper', reach: 1.5, width: 11, passes: 1, capKg: 160, speedMult: 1.25, speedUpScale: 0.5, cost: 30000, ride: 0.55, rocksPassable: true },
   ],
+  // Balancing (owner pass 4): every branch has a max level; level i (0-based) adds max(step - decay * i, 0) (diminishing returns);
+  // cost = base * growth^level. Speed: steeper growth, a short ladder and a hard cap on the bonus over the tier's base speed
+  // (vehicles scale it by speedUpScale). Payout (sell) and Panel Boost (Lit $/s) multiply different income streams, so they never stack.
   upgrades: {
-    growth: 1.15,
-    capacity: { base: 60, step: 0.2 /* +20% capacity per level */ }, // bases tuned x4 with pricePerKg
-    width: { base: 800, step: 1, max: 2 },
-    speed: { base: 100, step: 0.08 },
-    payout: { base: 160, step: 0.15 },
-    panelBoost: { base: 240, step: 0.15 },
+    capacity: { base: 60, growth: 1.15, step: 0.2, decay: 0.015, max: 10 },   // +20%, +18.5%, ... = +132% at Lv 10
+    width: { base: 800, growth: 1.15, step: 1, decay: 0, max: 2 },            // +1 tile per level, +2 max
+    speed: { base: 100, growth: 1.28, step: 0.08, decay: 0.006, max: 8, cap: 0.45 }, // +8%, +7.4%, ... capped at +45%
+    payout: { base: 160, growth: 1.17, step: 0.15, decay: 0.01, max: 10 },    // +15%, +14%, ... = +105% at Lv 10
+    panelBoost: { base: 240, growth: 1.17, step: 0.15, decay: 0.01, max: 10 },
   },
   storm: { intervalSec: 90, warningSec: 8, litFraction: 0.10, dirtAfter: 0.5, firstStormAtSec: 130, firstStormTiles: 6, bandRows: 16, frontSec: 4, samples: 4 },
   keeper: { cost: [0, 150, 600, 2000, 6000, 15000], max: 6, secPerPass: 0.5, speed: 3.0, passPower: 0.5 }, // secPerPass tuned (concept 1.5: 3 Keepers held only 85%)
@@ -43,8 +45,10 @@ const CONFIG = {
   launch: { stardustPerLitPct: 0.1 },
   offline: { capMin: 120, noKeeperUptime: 0.4, keeperTravelFactor: 0.5 },
   ads: { firstAdMinSec: 240 }, // no ads in greybox; kept for reference
-  ui: { payZoneSec: 1.5 /* 3D: standing on a gate pad pays its cost over this many seconds (cash flows out) */ },
-  feel: { popSec: 0.22, popScale: 0.08, toneWindowSec: 1, toneMax: 8, milestonePct: 10, introSec: 3.2, zoomOutSec: 2.4 },
+  // dwellSec: every pad / pay zone / panel fires only after the player stands on it this long (stepping off resets; walking through
+  // does nothing); the Depot sell rim uses the shorter sellDwellSec. payZoneSec: a pay zone then pays its cost over this many seconds.
+  ui: { payZoneSec: 1.5, dwellSec: 0.6, sellDwellSec: 0.35 },
+  feel: { popSec: 0.22, popScale: 0.08, toneWindowSec: 1, toneMax: 8, milestonePct: 10, introSec: 4.6, zoomOutSec: 2.4 },
   seed: 1,
 };
 
@@ -69,16 +73,19 @@ const C = 48, R = 72, N = C * R;
 // World layout (tile coords). Every rect below is a clean foundation: no dust, not sweepable, not in Moon %, skipped by storms
 // (KIND != 0: 1 = Depot plate, the Grid Link source; 2 = pads, building plates, gate pads; 3 = rock). SOLIDS and ROCKS block the
 // player, the Keepers and the tool head (circle vs box). The 3D layer places every mesh from these numbers.
-const DEPOT = { c: 9, r: 62, w: 4, h: 4 }; // Depot plate; the building fills it except a 0.45 rim, walking up to it sells
+// Base plaza (owner pass 4): every building sits on one clean station-deck plaza on the west edge around the Moon Station hub;
+// the field east of it is only dust. The plaza is a Grid Link source (KIND 1) like the Depot: the station powers the deck.
+const PLAZA = { c: 0, r: 50, w: 8, h: 22 };
+const DEPOT = { c: 3, r: 60, w: 4, h: 4 }; // Depot plate; the building fills it except a 0.45 rim, standing at its wall sells
 const DEPOT_C = { x: DEPOT.c + 2, y: DEPOT.r + 2 };
 const SELL = { c: DEPOT.c - 0.45, r: DEPOT.r - 0.45, w: DEPOT.w + 0.9, h: DEPOT.h + 0.9 }; // touching the building's wall sells (walk steps stop up to 0.3 short of it)
 const PADZ = { // stand-on pads (3D: panel or pay zone)
-  terminal: { c: 3, r: 62, w: 3, h: 3 }, tool: { c: 3, r: 67, w: 3, h: 3 }, crew: { c: 3, r: 57, w: 3, h: 3 },
-  refinery: { c: 14, r: 64, w: 2, h: 2 }, launch: { c: 14, r: 61, w: 2, h: 2 },
+  terminal: { c: 1, r: 56, w: 3, h: 3 }, tool: { c: 1, r: 67, w: 3, h: 3 }, crew: { c: 5, r: 67, w: 3, h: 3 },
+  refinery: { c: 5, r: 56, w: 2, h: 2 }, launch: { c: 5, r: 51, w: 2, h: 2 },
 };
 const BLDG = { // building plates; the building is solid inside its plate (inset 0.15)
-  terminal: { c: 3, r: 61, w: 3, h: 1 }, rack: { c: 3, r: 70, w: 3, h: 1 }, hangar: { c: 3, r: 55, w: 3, h: 2 },
-  refinery: { c: 16, r: 64, w: 2, h: 2 }, launch: { c: 16, r: 61, w: 2, h: 2 },
+  terminal: { c: 1, r: 55, w: 3, h: 1 }, rack: { c: 1, r: 70, w: 3, h: 1 }, hangar: { c: 5, r: 70, w: 3, h: 2 },
+  refinery: { c: 5, r: 54, w: 2, h: 2 }, launch: { c: 1, r: 50, w: 4, h: 4 }, // launch: the full-scale rocket stands on this 4 x 4 plate
   hub: { c: 0, r: 63, w: 2, h: 3 }, // Moon Station airlock: the dome sits off-map to the west, its tube opens onto the deck here
 };
 // gate pads straddle the border of the sector they open (half on each side; the player stands on the open half)
@@ -96,7 +103,7 @@ const inset = (b, m) => ({ x0: b.c + m, y0: b.r + m, x1: b.c + b.w - m, y1: b.r 
 const SOLIDS = [inset(DEPOT, 0.45), ...Object.values(BLDG).map(b => inset(b, 0.15))];
 for (let i = 0; i < N; i++) { const c = i % C, r = (i / C) | 0; SEC[i] = sectorOf(c, r); }
 const markRect = (b, k) => { for (let r = b.r; r < b.r + b.h; r++) for (let c = b.c; c < b.c + b.w; c++) KIND[r * C + c] = k; };
-[...Object.values(PADZ), ...Object.values(BLDG), ...PADS.slice(1)].forEach(b => markRect(b, 2)); markRect(DEPOT, 1);
+markRect(PLAZA, 1); [...Object.values(PADZ), ...Object.values(BLDG), ...PADS.slice(1)].forEach(b => markRect(b, 2)); markRect(DEPOT, 1);
 for (const k of ROCKS) KIND[k.r * C + k.c] = 3;
 const SWEEPABLE = KIND.reduce((n, k) => n + (k ? 0 : 1), 0);
 // circle (radius rad) vs SOLIDS boxes and ROCKS circles
@@ -119,17 +126,19 @@ const inRectT = (x, y, r) => x >= r.c && x < r.c + r.w && y >= r.r && y < r.r + 
 // ===== economy =====
 const UPS = ['capacity', 'width', 'speed', 'payout', 'panelBoost'];
 const toolDef = S => S.cfg.tools[S.tool];
-const capKg = S => toolDef(S).capKg * (1 + S.cfg.upgrades.capacity.step * S.up.capacity);
-const toolWidth = S => toolDef(S).width + S.cfg.upgrades.width.step * S.up.width;
-const playerSpeed = S => S.cfg.player.speed * toolDef(S).speedMult * (1 + S.cfg.upgrades.speed.step * S.up.speed);
-const payoutMult = S => 1 + S.cfg.upgrades.payout.step * S.up.payout;
-const panelMult = S => 1 + S.cfg.upgrades.panelBoost.step * S.up.panelBoost;
+// total bonus of an upgrade branch at its current level (diminishing returns, optional hard cap)
+function upBonus(S, id, lv = S.up[id]) { const u = S.cfg.upgrades[id]; let b = 0; for (let i = 0; i < lv; i++) b += Math.max(0, u.step - u.decay * i); return u.cap != null ? Math.min(u.cap, b) : b; }
+const capKg = S => toolDef(S).capKg * (1 + upBonus(S, 'capacity'));
+const toolWidth = S => toolDef(S).width + upBonus(S, 'width');
+const playerSpeed = S => S.cfg.player.speed * toolDef(S).speedMult * (1 + upBonus(S, 'speed') * (toolDef(S).speedUpScale ?? 1));
+const payoutMult = S => 1 + upBonus(S, 'payout');
+const panelMult = S => 1 + upBonus(S, 'panelBoost');
 const nextGate = S => S.unlocked.indexOf(false);
 const gateCost = (S, k) => S.cfg.grid.sectorGateCost[k];
 const canLaunch = S => S.fuel >= S.cfg.refinery.tankKg - 1e-9 && S.litCount >= S.cfg.refinery.launchMinLit * SWEEPABLE;
 function costOf(S, id) {
   const U = S.cfg.upgrades;
-  if (UPS.includes(id)) { if (id === 'width' && S.up.width >= U.width.max) return null; return U[id].base * Math.pow(U.growth, S.up[id]); }
+  if (UPS.includes(id)) { const u = U[id]; return S.up[id] >= u.max ? null : u.base * Math.pow(u.growth, S.up[id]); }
   if (id === 'tool') { const t = S.cfg.tools[S.tool + 1]; return t ? t.cost : null; }
   if (id === 'keeper') return S.crewOpen && S.keepers.length < S.cfg.keeper.max ? S.cfg.keeper.cost[S.keepers.length] : null;
   return null;
@@ -182,7 +191,7 @@ function newGame(cfg, keep = {}) {
     dirt: new Float32Array(N), ever: new Uint8Array(N), foot: new Int32Array(N), footId: 1, popAt: new Float32Array(N).fill(-9), shineUntil: new Float32Array(N), stormAt: new Float32Array(N).fill(-9),
     linked: new Uint8Array(N), dist: new Int16Array(N), par: new Int32Array(N).fill(-1), q: new Int32Array(N),
     unlocked: [true, false, false, false, false, false], payFlow: false, gatePaid: 0, litCount: 0, everCount: 0, stormed: 0, linkedCount: 0, rate: 0, linkT: 0,
-    player: { x: DEPOT.c - 1.5, y: DEPOT.r + 2, tc: -1, tr: -1, face: -Math.PI / 2, moving: false },
+    player: { x: DEPOT.c + DEPOT.w + 1.5, y: DEPOT.r + 2, tc: -1, tr: -1, face: -Math.PI / 2, moving: false },
     keepers: [], crewOpen: false, storm: { phase: 'idle', next: cfg.storm.firstStormAtSec, count: 0, targets: [], ti: 0, front: 0, dir: 1, r0: 0 },
     chain: 0, lastLitT: -9, lastTone: -9, blocked: -9, milestone: 0, zoomAt: -99, fx: [], popup: null, sfxFn: null,
     tele: { firstUpgrade: null, firstLit: null, firstSell: null, tierAt: {}, keeperAt: {}, gateAt: {}, launchAt: null, min: [], upK3: [0, 0], upK0: [0, 0], storms: 0 },
@@ -371,15 +380,21 @@ function stepKeepers(S, dt) {
     else { k.x = tx; k.y = ty; if (k.target >= 0) { k.working = true; k.work += dt; if (k.work >= kc.secPerPass) { k.work = 0; passTile(S, k.target, kc.passPower, false); } } }
   }
 }
+// dwell-to-trigger: true once the player has stood on `key` for `need` s; stepping off resets. S.ringP = progress for the foot ring.
+function dwell(S, key, on, dt, need) {
+  const d = S.dw || (S.dw = {}); d[key] = on ? (d[key] || 0) + dt : 0;
+  if (on) S.ringP = Math.max(S.ringP || 0, Math.min(1, d[key] / need));
+  return on && d[key] >= need;
+}
 function step(S, dt, input) {
-  S.t += dt;
+  S.t += dt; S.ringP = 0;
   if (input) movePlayer(S, input.x, input.y, dt); else S.player.moving = false;
   const p = S.player;
-  if (inRectT(p.x, p.y, SELL)) sell(S);
+  if (dwell(S, 'sell', inRectT(p.x, p.y, SELL), dt, S.cfg.ui.sellDwellSec)) sell(S);
   const ad = toolDef(S).autoDumpSec; // Ride-on: the canister empties to the Depot on its own
   if (ad && (S.dumpT = (S.dumpT ?? ad) - dt) <= 0) { S.dumpT = ad; if (S.can > 0) { sell(S); S.tele.autoDumps = (S.tele.autoDumps || 0) + 1; } }
   const g = nextGate(S);
-  if (g > 0 && inRectT(p.x, p.y, PADS[g])) {
+  if (dwell(S, 'gate', g > 0 && inRectT(p.x, p.y, PADS[g]), dt, S.cfg.ui.dwellSec)) {
     if (!S.payFlow) unlockGate(S, g);
     else { // pay zone: cash flows into the gate while you stand on it; partial payment is kept
       const cost = gateCost(S, g), pay = Math.min(S.cash, cost * dt / (S.cfg.ui ? S.cfg.ui.payZoneSec : 1.5), cost - S.gatePaid);
@@ -462,7 +477,7 @@ function botBuy(S, B) {
     if (S.keepers.length < B.keepers && canBuy(S, 'keeper') && costOf(S, 'keeper') <= S.cash * 0.6) { buy(S, 'keeper'); continue; }
     if (canBuy(S, 'tool')) { buy(S, 'tool'); continue; }
     const g = nextGate(S), save = Math.min(costOf(S, 'tool') ?? 1e12, g > 0 && B.cleanFrac >= 0.6 ? gateCost(S, g) : 1e12);
-    const ups = UPS.filter(id => canBuy(S, id)).sort((a, b) => costOf(S, a) - costOf(S, b));
+    const ups = UPS.filter(id => canBuy(S, id) && !(B.skipUps || []).includes(id)).sort((a, b) => B.upPick === 'even' ? S.up[a] - S.up[b] || costOf(S, a) - costOf(S, b) : costOf(S, a) - costOf(S, b));
     if (!ups.length) break;
     const c = costOf(S, ups[0]);
     if (save < 1e12 && S.cash - c < save && c > save * B.upgradeShare) break;
@@ -471,10 +486,10 @@ function botBuy(S, B) {
   }
   return null;
 }
-function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true } = {}) {
+function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true, upPick = 'cheap', skipUps = [] } = {}) {
   const cfg = deepMerge(clone(CONFIG), overrides); cfg.seed = seed;
   const S = newGame(cfg, { headless: true, seed });
-  const B = { tile: -1, keepers, reclean, upgradeShare, cleanFrac: 0, noDirty: false, think: 0 };
+  const B = { tile: -1, keepers, reclean, upgradeShare, cleanFrac: 0, noDirty: false, think: 0, upPick, skipUps };
   let launchInfo = null, idleUp = [0, 0];
   while (S.t < minutes * 60) {
     const idle = idleAfter != null && S.t >= idleAfter * 60;
@@ -550,14 +565,26 @@ function selfTest() {
     && ROCKS.every(k => rects.every(b => !inRectT(k.x, k.y, b)));
   out.gatesOnBorders = PADS.slice(1).every((p, k) => { const v = (p.c + 1) % 24 === 0, a = SEC[p.r * C + p.c], b = SEC[(p.r + (v ? 0 : 1)) * C + p.c + (v ? 1 : 0)]; return (v || (p.r + 1) % 24 === 0) && a !== b && (a === k + 1 || b === k + 1); });
   // collision: walking into the Depot stops at its wall (still inside the sell rim); the tool head stops at a rock
-  const Q = newGame(clone(CONFIG), { headless: true }); Q.player.x = 7.5; Q.player.y = 64; for (let k = 0; k < 40; k++) step(Q, 0.05, { x: 1, y: 0 });
+  const Q = newGame(clone(CONFIG), { headless: true });
   const rk = ROCKS[0]; Q.player.x = rk.x - 1; Q.player.y = rk.y; Q.player.face = 0;
-  out.solidsBlock = Q.player.x > rk.x - 1.01 && headPos(Q).x <= rk.x - rk.rad + 1e-9 && (() => { const Z = newGame(clone(CONFIG), { headless: true }); Z.player.x = 7.5; Z.player.y = 64; for (let k = 0; k < 40; k++) step(Z, 0.05, { x: 1, y: 0 }); return Z.player.x > SELL.c && Z.player.x < DEPOT.c + 0.45 && Z.tele.firstSell !== null; })(); // stopped at the wall and sold there
+  out.solidsBlock = Q.player.x > rk.x - 1.01 && headPos(Q).x <= rk.x - rk.rad + 1e-9 && (() => { const Z = newGame(clone(CONFIG), { headless: true }); Z.player.x = DEPOT.c + DEPOT.w + 1.5; Z.player.y = DEPOT.r + 2; Z.can = 1; for (let k = 0; k < 40; k++) step(Z, 0.05, { x: -1, y: 0 }); return Z.player.x < SELL.c + SELL.w && Z.player.x > DEPOT.c + DEPOT.w - 0.45 && Z.tele.firstSell !== null; })(); // stopped at the wall and sold there
+  // dwell: walking straight through the gate pad or the sell rim triggers nothing; standing still fires after dwellSec / sellDwellSec
+  const Dw = newGame(clone(CONFIG), { headless: true }), g1 = PADS[1]; Dw.cash = 1e4; Dw.player.x = g1.c + 0.6; Dw.player.y = g1.r - 1.2;
+  for (let k = 0; k < 20; k++) step(Dw, 0.05, { x: 0, y: 1 }); const passGate = !Dw.unlocked[1] && Dw.player.y > g1.r + g1.h;
+  Dw.player.x = g1.c + 0.6; Dw.player.y = g1.r + 1; for (let k = 0; k < 11; k++) step(Dw, 0.05, null); const early = !Dw.unlocked[1];
+  for (let k = 0; k < 2; k++) step(Dw, 0.05, null);
+  const Ds = newGame(clone(CONFIG), { headless: true }); Ds.can = 1; Ds.player.x = SELL.c + SELL.w - 0.2; Ds.player.y = SELL.r - 1; for (let k = 0; k < 6; k++) step(Ds, 0.05, { x: 0, y: 1 }); for (let k = 0; k < 6; k++) step(Ds, 0.05, { x: 1, y: 0 });
+  out.dwell = passGate && early && Dw.unlocked[1] && Ds.can >= 1 && Ds.tele.firstSell === null;
+  // balancing: effective speed never exceeds the tier base * (1 + cap), every branch stops at its max level, Width stays at +2
+  const Sp = newGame(clone(CONFIG), { headless: true }), UG = Sp.cfg.upgrades; let capOk = true;
+  for (let k = 0; k < Sp.cfg.tools.length; k++) for (const lv of [0, UG.speed.max, 99]) { Sp.tool = k; Sp.up.speed = lv; capOk = capOk && playerSpeed(Sp) <= Sp.cfg.player.speed * Sp.cfg.tools[k].speedMult * (1 + UG.speed.cap) + 1e-9; }
+  const maxed = newGame(clone(CONFIG), { headless: true }); UPS.forEach(id => maxed.up[id] = UG[id].max);
+  out.balance = capOk && UPS.every(id => costOf(maxed, id) === null) && upBonus(maxed, 'width') === 2 && upBonus(maxed, 'speed') <= UG.speed.cap + 1e-9;
   // station hub airlock: clean foundation, solid; walking down column 1 from the north stops at its wall
   const Hb = BLDG.hub, Hw = newGame(clone(CONFIG), { headless: true }); Hw.player.x = 1; Hw.player.y = Hb.r - 1.5; for (let k = 0; k < 40; k++) step(Hw, 0.05, { x: 0, y: 1 });
   out.hubSolid = KIND[(Hb.r + 1) * C + Hb.c] === 2 && blocked(Hb.c + 1, Hb.r + 1.5, 0.3) && Hw.player.y < Hb.r + 0.15 && Hw.player.y > Hb.r - 1;
   // a toothbrush tile needs exactly 3 passes; a storm tile drops to dirtAfter; a Keeper re-lights it
-  const T = newGame(clone(CONFIG), { headless: true }); const i0 = 60 * C + 5;
+  const T = newGame(clone(CONFIG), { headless: true }); const i0 = 60 * C + 15;
   passTile(T, i0, 1 / 3, true); passTile(T, i0, 1 / 3, true); const before = T.dirt[i0] > 0; passTile(T, i0, 1 / 3, true);
   out.threePasses = before && T.dirt[i0] === 0 && T.litCount === 1;
   T.dirt[i0] = CONFIG.storm.dirtAfter; T.litCount--; T.stormed++; T.crewOpen = true; buy(T, 'keeper');
@@ -565,17 +592,17 @@ function selfTest() {
   out.keeperRelights = T.dirt[i0] === 0 && T.stormed === 0;
   out.lockedSectorUnsweepable = passTile(T, 10 * C + 5, 1, true) === 0;
   // the tool head sweeps (ahead of the player), across the facing, `width` tiles wide
-  const H = newGame(clone(CONFIG), { headless: true }); H.player.x = 5.5; H.player.y = 60.5; H.player.face = 0; step(H, 0.05, { x: 1, y: 0 });
-  out.headSweeps = H.dirt[60 * C + 6] < 1 && H.dirt[60 * C + 5] === 1;
-  H.tool = 3; H.player.x = 10.5; H.player.y = 55.5; H.player.face = -Math.PI / 2; 
-  step(H, 0.05, { x: 0, y: -1 }); // Push Broom stroke upward: head ~ row 54, four columns wide (8.5-12.5)
+  const H = newGame(clone(CONFIG), { headless: true }); H.player.x = 15.5; H.player.y = 60.5; H.player.face = 0; step(H, 0.05, { x: 1, y: 0 });
+  out.headSweeps = H.dirt[60 * C + 16] < 1 && H.dirt[60 * C + 15] === 1;
+  H.tool = 3; H.player.x = 20.5; H.player.y = 55.5; H.player.face = -Math.PI / 2; 
+  step(H, 0.05, { x: 0, y: -1 }); // Push Broom stroke upward: head ~ row 54, four columns wide (18.5-22.5)
   const hit = c => H.dirt[53 * C + c] < 1 || H.dirt[54 * C + c] < 1;
   const edge = c => Math.min(H.dirt[53 * C + c], H.dirt[54 * C + c]) > 0.9; // brushPad only grazes the neighbours
-  out.widthAcross = [8, 9, 10, 11, 12].every(hit) && edge(7) && edge(13);
+  out.widthAcross = [18, 19, 20, 21, 22].every(hit) && edge(17) && edge(23);
   // a tile is Lit once 95% of its fine cells are clean, and a storm re-dusts its cells
-  const F = newGame(clone(CONFIG), { headless: true }), j = 60 * C + 5, SB = F.SUB;
-  for (let y = 0; y < SB; y++) for (let x = 0; x < SB; x++) if (y || x) F.sub[(60 * SB + y) * F.MW + 5 * SB + x] = 0;
-  refreshTile(F, j, true); out.fineLit = F.dirt[j] === 0 && F.litCount === 1 && F.sub[60 * SB * F.MW + 5 * SB] === 0;
+  const F = newGame(clone(CONFIG), { headless: true }), j = 60 * C + 15, SB = F.SUB;
+  for (let y = 0; y < SB; y++) for (let x = 0; x < SB; x++) if (y || x) F.sub[(60 * SB + y) * F.MW + 15 * SB + x] = 0;
+  refreshTile(F, j, true); out.fineLit = F.dirt[j] === 0 && F.litCount === 1 && F.sub[60 * SB * F.MW + 15 * SB] === 0;
   // launch resets planet but keeps tool + stardust
   T.tool = 3; T.fuel = CONFIG.refinery.tankKg; const r = launch(T); const U = newGame(clone(CONFIG), { tool: T.tool, stardust: T.stardust, headless: true });
   out.launchKeepsTool = U.tool === 3 && U.cash === 0 && U.litCount === 0 && U.stardust === r.stardust;
@@ -583,5 +610,5 @@ function selfTest() {
   out.pass = Object.values(out).every(v => v === true);
   return out;
 }
-globalThis.SP = { SELL, headPos, blocked, PADZ, BLDG, ROCKS, SOLIDS, KIND, SWEEPABLE, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
+globalThis.SP = { upBonus, playerSpeed, UPS, PLAZA, dwell, SELL, headPos, blocked, PADZ, BLDG, ROCKS, SOLIDS, KIND, SWEEPABLE, CONFIG, newGame, step, buy, runBot, botReport, selfTest, teleSummary, skipOffline, launch };
 

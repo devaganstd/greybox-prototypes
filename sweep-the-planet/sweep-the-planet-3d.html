@@ -36,7 +36,7 @@
 <div id="err"></div>
 <div id="cap"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=vac1"></script>
+<script src="sweep-sim.js?v=helper1"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -57,6 +57,7 @@ const ZONES = {
   terminal: Object.assign({ kind: 'panel', label: 'UPGRADES', bg: PAL.teal }, PADZ.terminal),
   tool: Object.assign({ kind: 'pay', label: 'TOOL RACK', bg: PAL.yellow }, PADZ.tool),
   crew: Object.assign({ kind: 'pay', label: 'CREW BAY', bg: PAL.mint }, PADZ.crew),
+  helper: Object.assign({ kind: 'pay', label: 'HELPER BOT', bg: PAL.orange }, PADZ.helper), // Mercury: Helper Robot hire, next to the Crew Bay
   refinery: Object.assign({ kind: 'panel', label: 'REFINERY', bg: PAL.purple }, PADZ.refinery),
   launch: Object.assign({ kind: 'panel', label: 'LAUNCH', bg: PAL.orange }, PADZ.launch),
 };
@@ -382,6 +383,14 @@ function keeperMesh() {
   const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.16, 1, 8), new THREE.MeshBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0.45, depthWrite: false })); g.add(beam); g.userData.beam = beam;
   g.userData.blob = blob(scene, 0.9, 0.9); scene.add(g); return g;
 }
+// helpers (Mercury): wheeled sweeper bots on the ground
+const helperMeshes = [];
+function helperMesh() {
+  const g = new THREE.Group();
+  if (ASSETS && ASSETS.has('helper')) g.add(addOutline(ASSETS.clone('helper')));
+  else { const b = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.35, 0.5), lam(0xffc857)); b.position.y = 0.25; g.add(b); }
+  g.userData.blob = blob(scene, 0.9, 0.7); scene.add(g); return g;
+}
 // ----- toy assets (assets/sweep-assets.glb, built by assets-src/make_assets.py in Blender) -----
 // Loaded async; until then (or if loading fails) the primitives above stay. Materials become toon + rim; glow parts are unlit.
 let ASSETS = null;
@@ -411,11 +420,11 @@ function useAssets(gltf) {
     const g = lib[n].getObjectByProperty('isMesh', true).geometry.clone(); g.computeBoundingBox(); const b = g.boundingBox, c = b.getCenter(new THREE.Vector3()), sz = b.getSize(new THREE.Vector3()), k = 0.84 / Math.max(sz.x, sz.z);
     g.translate(-c.x, -b.min.y, -c.z); g.scale(k, k, k); g.translate(0, -0.06, 0); return g; };
   rockSolid.geometry = geo('rock'); rockDecor.geometry = geo('rock2');
-  toolKey = rackKey = ''; keeperMeshes.splice(0).forEach(m => { scene.remove(m); scene.remove(m.userData.blob); }); // rebuilt next frame with the toy models
+  toolKey = rackKey = ''; [...keeperMeshes.splice(0), ...helperMeshes.splice(0)].forEach(m => { scene.remove(m); scene.remove(m.userData.blob); }); // rebuilt next frame with the toy models
   SP.assets = 'glb';
 }
 SP.assets = 'loading';
-new GLTFLoader().load('assets/sweep-assets.glb?v=vac1', g => { useAssets(g); LOAD.assets = performance.now(); }, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+new GLTFLoader().load('assets/sweep-assets.glb?v=helper1', g => { useAssets(g); LOAD.assets = performance.now(); }, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
 // code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
 const anim = { squash: 0, lastCan: 0, sweepT: 0, tierPop: 0, lastTool: 0 };
 function animatePlayer(S, p, dt) {
@@ -589,7 +598,7 @@ function zoomK(S) {
 }
 let shake = 0;
 // Crew Bay pad + label appear after the first storm (Keepers unlock then in the sim)
-function syncReveal(S) { ZONES.crew.pad.visible = ZONES.crew.label3d.visible = S.crewOpen; }
+function syncReveal(S) { ZONES.crew.pad.visible = ZONES.crew.label3d.visible = S.crewOpen; ZONES.helper.pad.visible = ZONES.helper.label3d.visible = !!planetDef(S).helpers; }
 function updateWorld(S, realDt) {
   const p = S.player, k = zoomK(S), yaw = CAM.yawDeg * Math.PI / 180, pitch = lerp(CAM.pitchDeg, CAM.planetPitchDeg, S.t < S.cfg.feel.introSec ? clamp((k - K_EST) / (1 - K_EST), 0, 1) : k) * Math.PI / 180; // the establishing shot keeps the play pitch
   groundMat.uniforms.uTime.value = S.t;
@@ -635,8 +644,14 @@ function updateWorld(S, realDt) {
     m.userData.beam.visible = !!kp.working; m.userData.beam.scale.y = y; m.userData.beam.position.y = -y / 2;
     m.userData.blob.position.set(kp.x, 0.02, kp.y); m.userData.blob.scale.setScalar(0.9 - (y - 1.6));
   });
+  while (helperMeshes.length < S.helpers.length) helperMeshes.push(helperMesh());
+  helperMeshes.forEach((m, i) => {
+    const h = S.helpers[i]; m.visible = m.userData.blob.visible = !!h; if (!h) return;
+    m.position.set(h.x, h.working ? Math.abs(Math.sin(S.t * 18 + i)) * 0.03 : 0, h.y); m.rotation.y = -(h.face || 0); m.userData.blob.position.set(h.x, 0.02, h.y);
+    if (h.working && Math.random() < 0.25) { const f = h.face || 0; puff(h.x + Math.cos(f) * 0.45, 0.08, h.y + Math.sin(f) * 0.45, Math.random() - 0.5, 0.4 + Math.random() * 0.4, Math.random() - 0.5, 0.4); }
+  });
   // Depot / Refinery / Launch Pad / pads
-  const fk = S.fuel / S.cfg.refinery.tankKg; fuelFill.scale.y = Math.max(0.001, fk * 1.8); fuelFill.position.y = 0.4 + fk * 0.9;
+  const fk = S.fuel / tankKg(S); fuelFill.scale.y = Math.max(0.001, fk * 1.8); fuelFill.position.y = 0.4 + fk * 0.9;
   const ready = canLaunch(S); rocketNose.material.color.setHex(ready && Math.sin(S.t * 6) > 0 ? 0xffc857 : 0xff8a3d); rocket.position.y = cine ? Math.pow(cine.t / CINE_SEC, 2.2) * 70 : ready ? Math.abs(Math.sin(S.t * 3)) * 0.15 : 0;
   if (cine) { const lp = bc(BLDG.launch); for (let i = 0; i < 6; i++) spark(lp.x + (Math.random() - 0.5) * 1.6, rocket.position.y + 0.6, lp.z + (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 3, -6 - Math.random() * 4, (Math.random() - 0.5) * 3, 0.6, i % 2 ? 0xffc857 : 0xff8a3d, -2); for (let i = 0; i < 3; i++) puff(lp.x + (Math.random() - 0.5) * 3, 0.3, lp.z + (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 4, 0.6, (Math.random() - 0.5) * 4, 1.2); shake = Math.max(shake, 0.25 * (1 - cine.t / CINE_SEC)); }
   const g = nextGate(S); gateGroup.visible = gateLabel.visible = g > 0;
@@ -653,7 +668,7 @@ function updateWorld(S, realDt) {
     if (z.kind !== 'pay') continue;
     const pz = PAYZ[id], ok = pz.ok(S), cost = ok ? pz.cost(S) : 0, paid = ok && cost > 0 ? clamp((S.zonePaid[id] || 0) / cost, 0, 1) : 0;
     U.uProg.value = paid;
-    if (z.pad.visible) z.label3d.userData.set(!ok ? (id === 'tool' ? 'MAX TOOL' : 'CREW FULL') : cost === 0 ? 'FREE' : (id === 'tool' ? pz.name(S) + ' ' : 'Keeper ') + '$' + fmt(cost - (S.zonePaid[id] || 0)), cost === 0 && ok ? PAL.mint : z.bg);
+    if (z.pad.visible) z.label3d.userData.set(!ok ? (id === 'tool' ? 'MAX TOOL' : id === 'helper' ? 'HELPERS FULL' : 'CREW FULL') : cost === 0 ? 'FREE' : (id === 'tool' ? pz.name(S) + ' ' : id === 'helper' ? 'Helper ' : 'Keeper ') + '$' + fmt(cost - (S.zonePaid[id] || 0)), cost === 0 && ok ? PAL.mint : z.bg);
   }
   stepFlows(realDt); stepPuffs(S, realDt); stepFx(S, realDt);
   stepAlarm(S);
@@ -666,6 +681,7 @@ const inZone = (S, z) => inRectT(S.player.x, S.player.y, z);
 const PAYZ = {
   tool: { ok: S => !!S.cfg.tools[S.tool + 1], cost: S => S.cfg.tools[S.tool + 1].cost, name: S => S.cfg.tools[S.tool + 1].id, done: S => buy(S, 'tool') },
   crew: { ok: S => costOf(S, 'keeper') != null, cost: S => costOf(S, 'keeper'), done: S => buy(S, 'keeper') },
+  helper: { ok: S => costOf(S, 'helper') != null, cost: S => costOf(S, 'helper'), done: S => buy(S, 'helper') },
 };
 function stepPayZones(S, dt) {
   const ready = S.zoneReady || (S.zoneReady = {});
@@ -786,7 +802,7 @@ function upIcon(id, x, y, col) {
 }
 const LABEL = { capacity: 'Capacity', width: 'Width', speed: 'Speed', payout: 'Payout', panelBoost: 'Panel Boost' };
 const EFFECT = { capacity: 'canister kg', width: 'sweep width', speed: 'walk speed', payout: 'sell price', panelBoost: 'panel $/s' };
-const showFuel = S => S.planet === 0 && (S.t > 240 || S.launches > 0); // Mercury teaser has no Launch yet // Fuel joins the HUD at the fuel FTUE (minute 4), batch7c R8
+const showFuel = S => S.t > 240 || S.launches > 0; // Fuel joins the HUD at the fuel FTUE (minute 4), batch7c R8
 const zoneC = z => ({ x: z.c + z.w / 2, z: z.r + z.h / 2 });
 function goalTarget(S) {
   if (S.can >= capKg(S) - 1e-6) return { x: DEPOT_C.x, z: DEPOT_C.y, label: 'Sell' };
@@ -821,8 +837,8 @@ function drawSheet(S, sid) {
     }
   }
   ctx.textAlign = 'center'; ctx.fillStyle = PAL.mute; ctx.font = '11px system-ui';
-  if (sid === 'refinery') ctx.fillText('Dust sold at the Depot: this share becomes Fuel (tank ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg + ')', W / 2, top + 132);
-  else if (sid === 'launch') ctx.fillText('Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg + ' · Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W / 2, top + 140);
+  if (sid === 'refinery') ctx.fillText('Dust sold at the Depot: this share becomes Fuel (tank ' + Math.floor(S.fuel) + '/' + tankKg(S) + ')', W / 2, top + 132);
+  else if (sid === 'launch') ctx.fillText('Fuel ' + Math.floor(S.fuel) + '/' + tankKg(S) + ' · Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W / 2, top + 140);
   else ctx.fillText('walk off the pad to close', W / 2, H - 10);
 }
 function drawStormEdge(S) { // red pulsing screen edge while a storm warns
@@ -865,7 +881,7 @@ function drawOverlay(S) {
   ctx.textAlign = 'right'; ctx.font = '800 10px system-ui'; ctx.fillStyle = up >= 0.9 ? PAL.teal : up >= 0.7 ? PAL.yellow : PAL.red; ctx.fillText('Grid ' + Math.round(100 * up) + '%', 266, 27);
   bar(146, 36, 118, 8, S.everCount / S.sweepable, PAL.teal);
   for (const [id, b] of Object.entries(HUD_BTN)) { if (id === 'map' && !(S.stardust > 0)) continue; pill(b.x, b.y, b.w, b.h, id === 'map' ? PAL.purple : PAL.orange); ctx.fillStyle = id === 'map' ? PAL.plum : PAL.cream; ctx.font = '900 12px system-ui'; ctx.textAlign = 'center'; ctx.fillText(b.label + (id === 'map' ? ' ★' + S.stardust : ''), b.x + b.w / 2, b.y + b.h / 2 + 4); }
-  if (showFuel(S)) { bar(W - 104, HUD_H + 28, 96, 14, S.fuel / cfg.refinery.tankKg, PAL.purple, 'Fuel ' + Math.floor(S.fuel) + '/' + cfg.refinery.tankKg); ctx.fillStyle = PAL.cream; ctx.font = '10px system-ui'; ctx.textAlign = 'right'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W - 8, HUD_H + 54); }
+  if (showFuel(S)) { bar(W - 104, HUD_H + 28, 96, 14, S.fuel / tankKg(S), PAL.purple, 'Fuel ' + Math.floor(S.fuel) + '/' + tankKg(S)); ctx.fillStyle = PAL.cream; ctx.font = '10px system-ui'; ctx.textAlign = 'right'; ctx.fillText('Lit ' + (100 * S.litCount / SWEEPABLE).toFixed(1) + '% / ' + Math.round(100 * cfg.refinery.launchMinLit) + '%', W - 8, HUD_H + 54); }
   const st = S.storm;
   if (st.phase === 'warn') {
     drawStormEdge(S);
@@ -926,17 +942,18 @@ const cheatEl = document.getElementById('cheat');
 function cheat(name, fn) { fn(G); if (name !== 'Game Reset') (G.tele.cheats ??= []).push({ name, t: +G.t.toFixed(1) }); // a reset starts a clean, unmarked game
   console.log('[cheat]', name, 'at', mmss(G.t)); buildCheat(); }
 function stormNow(S) { const st = S.storm; if (st.phase === 'blow') return; if (st.phase === 'idle') { st.next = S.t; step(S, 0.001, null); } if (st.phase === 'warn') st.blowAt = S.t; }
+function giveHelper(S) { const c = costOf(S, 'helper'); if (c == null) return; S.cash += c; buy(S, 'helper'); } // Mercury only
 function giveKeeper(S) { S.crewOpen = true; const c = costOf(S, 'keeper'); if (c == null) return; S.cash += c; buy(S, 'keeper'); }
 const CHEATS = [
   ['Cash', [['×10', S => { S.cash = Math.max(100, S.cash * 10); }], ['+1M', S => { S.cash += 1e6; }]]],
-  ['Fuel', [['Full tank', S => { S.fuel = S.cfg.refinery.tankKg; }]]],
+  ['Fuel', [['Full tank', S => { S.fuel = tankKg(S); }]]],
   ['Sectors', [['Unlock all', S => { S.unlocked = S.unlocked.map(() => true); S.gatePaid = 0; }]]],
   ['Tool tier', CONFIG.tools.map((t, k) => [(k + 1) + ' ' + t.id, S => { S.tool = k; S.tele.tierAt[k] ??= S.t; }])],
-  ['Crew', [['+Keeper', giveKeeper]]],
+  ['Crew', [['+Keeper', giveKeeper], ['+Helper', giveHelper]]],
   ['Storm', [['Dust Storm now', stormNow]]],
   ['Time', [1, 4, 10].map(x => ['×' + x, () => { speed = x; }])],
   ['Offline', [['Skip 1 hour', S => skipOffline(S, 60)]]],
-  ['Launch', [['Launch now', S => { S.fuel = S.cfg.refinery.tankKg; cine = { t: 0, info: launch(S) }; }]]],
+  ['Launch', [['Launch now', S => { S.fuel = tankKg(S); cine = { t: 0, info: launch(S) }; }]]],
   ['Game', [['Reset', () => { G = startGame(); camState.init = false; lookPlanet = -1; }]]],
 ];
 function buildCheat() {
@@ -1054,6 +1071,8 @@ function selfTest3d() {
     const SOLID_MESH = { depot, terminal: terminal, rack, hangar: crewBay, refinery, launch: launchPad, hub };
     r.noInvisibleSolids = Object.keys(BLDG).every(k => SOLID_MESH[k] && SOLID_MESH[k].visible) && depot.visible && SOLIDS.length === Object.keys(BLDG).length + 1; syncReveal(G); }
   if (ASSETS) r.hubAsset = ASSETS.has('hub');
+  if (ASSETS) r.helperAsset = ASSETS.has('helper');
+  syncReveal(G); r.helperPadMoonHidden = G.planet > 0 || !ZONES.helper.pad.visible;
   if (ASSETS) r.toolAssets = CONFIG.tools.every((t, k) => ASSETS.has('tool' + k) && (k < 4 || ASSETS.has('veh' + k)));
   r.padsOutsideDepot = Object.values(ZONES).every(z => z.c >= DEPOT.c + DEPOT.w || z.c + z.w <= DEPOT.c || z.r >= DEPOT.r + DEPOT.h || z.r + z.h <= DEPOT.r);
   r.inputMatchesCamera = Math.abs(v.x + Math.sin(yaw)) < 1e-9 && Math.abs(v.y + Math.cos(yaw)) < 1e-9; // "up" on screen = away from camera
@@ -1094,7 +1113,7 @@ const SEGS = {
   s2c: { setup: () => { const S = SEGS.s2b.setup(); for (let k = 0; k < 5; k++) { S.cash += costOf(S, 'keeper'); buy(S, 'keeper'); S.keepers[k].x = 26 + k * 3; S.keepers[k].y = 58; } return S; }, tick: (S, t) => SEGS.s2b.tick(S, t), cam: () => wide(34, 60, 34, 62) },
   s3a: { setup: () => { const S = capGame(6); paintLit(S, [0, 1], 0.9); S.crewOpen = true; buy(S, 'keeper'); S.storm.count = 1; for (let i = 0; i < N; i++) if (S.ever[i] && SEC[i] === 1 && hsh(i) % 9 === 0) { S.dirt[i] = 0.5; fillTile(S, i, 128); S.litCount--; S.stormed++; S.stormAt[i] = S.t; } S.keepers[0].x = 30; S.keepers[0].y = 60; return S; }, cam: S => { const k = S.keepers[0]; return wide(k.x, k.y, 11, 45); } },
   s3b: { setup: () => { const S = SEGS.s3a.setup(); paintLit(S, [2, 3], 0.85, 11); return S; }, tick: (S, t) => { if (S.keepers.length < 6 && t > S.keepers.length * 2) { S.cash += costOf(S, 'keeper'); buy(S, 'keeper'); } if (t > 3 && S.storm.next > 1e8) S.storm.next = S.t + 1; }, cam: (S, t) => wide(lerp(24, 26, t / SEG_SEC), lerp(56, 50, t / SEG_SEC), lerp(16, 30, t / SEG_SEC), 60) },
-  s3c: { setup: () => { const S = capGame(6); paintLit(S, [0, 1, 2, 3, 4, 5], 0.74); S.tool = 5; S.fuel = S.cfg.refinery.tankKg; S.player.x = ZONES.launch.c + 1; S.player.y = ZONES.launch.r + 1; return S; }, still: true, tick: (S, t) => { if (t > 1.2 && !S.launches) startLaunch(S); } },
+  s3c: { setup: () => { const S = capGame(6); paintLit(S, [0, 1, 2, 3, 4, 5], 0.74); S.tool = 5; S.fuel = tankKg(S); S.player.x = ZONES.launch.c + 1; S.player.y = ZONES.launch.r + 1; return S; }, still: true, tick: (S, t) => { if (t > 1.2 && !S.launches) startLaunch(S); } },
 };
 function stepCapture(real) {
   if (!cap) return; cap.t += real; const sg = SEGS[cap.id]; if (!cine && sg.tick && G === cap.S) sg.tick(G, cap.t);

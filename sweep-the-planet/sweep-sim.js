@@ -43,11 +43,15 @@ const CONFIG = {
   // bandRows 16 -> 32 = active bot uptime 84% without Keepers, 93% with 3; Keeper speed 3 -> 5, secPerPass 0.5 -> 0.35.
   storm: { intervalSec: 50, warningSec: 8, litFraction: 0.15, dirtAfter: 0.5, firstStormAtSec: 130, firstStormTiles: 6, bandRows: 32, frontSec: 4, samples: 4, hardenSec: 45, hardenDirt: 1.0, dustValue: 0.25 }, // dustValue: storm dust (on tiles Lit before) sells at this share: fine fallout, not fresh regolith, so storms cost more than they pay
   keeper: { cost: [0, 150, 600, 2000, 6000, 15000], max: 6, secPerPass: 0.35, speed: 5.0, passPower: 0.5, dustPay: 1.0 }, // dustPay (P0-1): a Keeper's swept dust is sold at this share of the sell price (no Fuel), so hiring never loses the storm dust a player would have swept; // secPerPass tuned (concept 1.5: 3 Keepers held only 85%)
+  // Helper Robot (owner 2026-11-22, Mercury): sweeps fresh dust on its own (nearest dirty never-Lit tile in open sectors, away from the
+  // player's sector), 3-tile brush, carries capKg back to the Depot and sells it there (same Fuel split as the player). Hired at the HELPER pad next to the Crew Bay.
+  helper: { cost: [500, 2500, 7000, 15000], max: 4, speed: 5, secPerPass: 0.3, passPower: 2, capKg: 12 }, // tuned 2026-11-22 (bot): Mercury Launch 45-54 min with Helpers vs 61-63 without
   hauler: { cost: [500, 3000, 12000], radius: 3 }, // G9 optional: not built in this greybox
   refinery: { defaultFuelShare: 0.3, tankKg: 150, launchMinLit: 0.7 },
   launch: { stardustPerLitPct: 0.1 },
-  // P0-3: planet 2 = Mercury teaser (same base layout, only sectors 1-2 open; Heat Dust is P1-2). The 3D layer owns the palette.
-  planets: [{ id: 'Moon', sectors: 6 }, { id: 'Mercury', sectors: 2 }],
+  // Mercury (owner 2026-11-22: full planet + Helper Robots): same base layout, all 6 sectors; fresh dust 5x thicker (storm fallout stays
+  // light), gates x0.6, rocket tank x2.5, so it is sweep-bound and Helpers matter. The 3D layer owns the palette.
+  planets: [{ id: 'Moon', sectors: 6 }, { id: 'Mercury', sectors: 6, helpers: true, passMult: 5, gateMult: 0.6, tankMult: 2.5 }],
   offline: { capMin: 120, noKeeperUptime: 0.4, keeperTravelFactor: 0.5 },
   ads: { firstAdMinSec: 240 }, // no ads in greybox; kept for reference
   // dwellSec: every pad / pay zone / panel fires only after the player stands on it this long (stepping off resets; walking through
@@ -85,7 +89,7 @@ const DEPOT = { c: 3, r: 60, w: 4, h: 4 }; // Depot plate; the building fills it
 const DEPOT_C = { x: DEPOT.c + 2, y: DEPOT.r + 2 };
 const SELL = { c: DEPOT.c - 0.9, r: DEPOT.r - 0.9, w: DEPOT.w + 1.8, h: DEPOT.h + 1.8 }; // touching the building's wall sells (walk steps stop up to 0.3 short of it)
 const PADZ = { // stand-on pads (3D: panel or pay zone)
-  terminal: { c: 1, r: 56, w: 3, h: 3 }, tool: { c: 1, r: 67, w: 3, h: 3 }, crew: { c: 5, r: 67, w: 3, h: 3 },
+  terminal: { c: 1, r: 56, w: 3, h: 3 }, tool: { c: 1, r: 67, w: 3, h: 3 }, crew: { c: 5, r: 67, w: 3, h: 3 }, helper: { c: 5, r: 65, w: 3, h: 2 },
   refinery: { c: 5, r: 56, w: 2, h: 2 }, launch: { c: 5, r: 51, w: 2, h: 2 },
 };
 const BLDG = { // building plates; the building is solid inside its plate (inset 0.15)
@@ -142,13 +146,16 @@ const planetDef = S => (S.cfg.planets || [])[S.planet] || { id: 'Moon', sectors:
 const nextGate = S => { const g = S.unlocked.indexOf(false); return g >= planetDef(S).sectors ? -1 : g; };
 // analytics (P0-5): S.evFn(name, props) is set by the 3D page; headless bots have none. Schema: README "Analytics event log".
 const ev = (S, name, props) => { if (S.evFn) S.evFn(name, Object.assign({ t: +S.t.toFixed(2), planet: planetDef(S).id }, props)); };
-const gateCost = (S, k) => S.cfg.grid.sectorGateCost[k];
-const canLaunch = S => S.fuel >= S.cfg.refinery.tankKg - 1e-9 && S.litCount >= S.cfg.refinery.launchMinLit * SWEEPABLE;
+const gateCost = (S, k) => S.cfg.grid.sectorGateCost[k] * (planetDef(S).gateMult || 1);
+const passMult = S => planetDef(S).passMult || 1; // later planets: thicker fresh dust (storm fallout stays light), a pass removes less
+const tankKg = S => S.cfg.refinery.tankKg * (planetDef(S).tankMult || 1); // bigger planets need a bigger rocket tank
+const canLaunch = S => S.fuel >= tankKg(S) - 1e-9 && S.litCount >= S.cfg.refinery.launchMinLit * S.sweepable;
 function costOf(S, id) {
   const U = S.cfg.upgrades;
   if (UPS.includes(id)) { const u = U[id]; return S.up[id] >= u.max ? null : u.base * Math.pow(u.growth, S.up[id]); }
   if (id === 'tool') { const t = S.cfg.tools[S.tool + 1]; return t ? t.cost : null; }
   if (id === 'keeper') return S.crewOpen && S.keepers.length < S.cfg.keeper.max ? S.cfg.keeper.cost[S.keepers.length] : null;
+  if (id === 'helper') return planetDef(S).helpers && S.helpers.length < S.cfg.helper.max ? S.cfg.helper.cost[S.helpers.length] : null;
   return null;
 }
 const canBuy = (S, id) => { const c = costOf(S, id); return c != null && S.cash >= c; };
@@ -159,6 +166,7 @@ function buy(S, id) {
   if (UPS.includes(id)) { S.up[id]++; ev(S, 'upgrade_buy', { id, lv: S.up[id], cost }); }
   else if (id === 'tool') { S.tool++; S.tele.tierAt[S.tool] = S.t; fxConfetti(S); sfx(S, 'tool'); ev(S, 'tool_buy', { tier: S.tool + 1, id: toolDef(S).id, cost }); }
   else if (id === 'keeper') { S.keepers.push({ x: DEPOT_C.x, y: DEPOT.r - 0.6, target: -1, work: 0, sector: -1, id: S.keepers.length }); S.tele.keeperAt[S.keepers.length] = S.t; sfx(S, 'keeper'); ev(S, 'keeper_hire', { n: S.keepers.length, cost }); }
+  else if (id === 'helper') { S.helpers.push({ x: DEPOT_C.x + 3, y: DEPOT.r + 5, target: -1, work: 0, kg: 0, id: S.helpers.length }); S.tele.helperAt[S.helpers.length] = S.t; sfx(S, 'keeper'); ev(S, 'helper_hire', { n: S.helpers.length, cost }); }
   return true;
 }
 function unlockGate(S, k) {
@@ -167,10 +175,10 @@ function unlockGate(S, k) {
   addText(S, PADS[k].c + 1, PADS[k].r, 'Sector ' + (k + 1) + ' open!', '#FFD45E');
   return true;
 }
-function sell(S) {
-  if (S.can <= 0) return;
-  const kg = S.can, room = Math.max(0, S.cfg.refinery.tankKg - S.fuel), fuelKg = Math.min(kg * S.fuelShare, room);
-  S.can = 0; S.fuel += fuelKg;
+function sell(S) { if (S.can <= 0) return; const kg = S.can; S.can = 0; sellKg(S, kg); }
+function sellKg(S, kg) { // player sale or a Helper's drop-off: Fuel share to the tank, the rest to cash
+  const room = Math.max(0, tankKg(S) - S.fuel), fuelKg = Math.min(kg * S.fuelShare, room);
+  S.fuel += fuelKg;
   const cash = (kg - fuelKg) * S.cfg.dust.pricePerKg * payoutMult(S);
   S.cash += cash; S.earned += cash; bin(S).sell += cash;
   if (S.tele.firstSell == null) S.tele.firstSell = S.t;
@@ -200,12 +208,13 @@ function newGame(cfg, keep = {}) {
     linked: new Uint8Array(N), dist: new Int16Array(N), par: new Int32Array(N).fill(-1), q: new Int32Array(N),
     unlocked: [true, false, false, false, false, false], payFlow: false, gatePaid: 0, litCount: 0, everCount: 0, stormed: 0, linkedCount: 0, rate: 0, linkT: 0,
     player: { x: DEPOT.c + DEPOT.w + 1.5, y: DEPOT.r + 2, tc: -1, tr: -1, face: -Math.PI / 2, moving: false },
-    keepers: [], crewOpen: false, storm: { phase: 'idle', next: cfg.storm.firstStormAtSec, count: 0, targets: [], ti: 0, front: 0, dir: 1, r0: 0 },
+    keepers: [], helpers: [], crewOpen: false, storm: { phase: 'idle', next: cfg.storm.firstStormAtSec, count: 0, targets: [], ti: 0, front: 0, dir: 1, r0: 0 },
     chain: 0, lastLitT: -9, lastTone: -9, blocked: -9, milestone: 0, zoomAt: -99, fx: [], popup: null, sfxFn: null,
-    tele: { firstUpgrade: null, firstLit: null, firstSell: null, tierAt: {}, keeperAt: {}, gateAt: {}, launchAt: null, min: [], upK3: [0, 0], upK0: [0, 0], storms: 0 },
+    tele: { firstUpgrade: null, firstLit: null, firstSell: null, tierAt: {}, keeperAt: {}, helperAt: {}, gateAt: {}, launchAt: null, min: [], upK3: [0, 0], upK0: [0, 0], storms: 0 },
     ftue: { done: {}, shownAt: {} },
   };
   S.rng = () => { const a = S.rs = (S.rs + 0x6D2B79F5) | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; // mulberry32 with its state on S (saveable)
+  if (planetDef(S).helpers) S.crewOpen = true; // later planets: the Crew Bay is open from the start
   S.sweepable = 0; for (let i = 0; i < N; i++) if (!KIND[i] && SEC[i] < planetDef(S).sectors) S.sweepable++;
   for (let i = 0; i < N; i++) S.dirt[i] = KIND[i] ? 0 : 1;
   const SUB = S.SUB = cfg.dust.sub; S.MW = C * SUB; S.MH = R * SUB; S.sub = new Uint8Array(S.MW * S.MH); S.subStamp = new Int32Array(S.MW * S.MH); S.stampId = 1; S.lastHead = null;
@@ -246,7 +255,7 @@ function onLit(S, i, byKeeper) {
 // Economy stays per tile: S.dirt[i] = mean level of the tile's cells; the tile is Lit once >= dust.litCleanFrac of its cells are clean
 // (the last few cells are wiped then). kg are collected per cell, so a tile still yields dust.kgPerTile in total.
 function markMask(S, x0, y0, x1, y1) { if (S.headless) return; const m = S.maskDirty; if (!m) S.maskDirty = { x0, y0, x1, y1 }; else { m.x0 = Math.min(m.x0, x0); m.y0 = Math.min(m.y0, y0); m.x1 = Math.max(m.x1, x1); m.y1 = Math.max(m.y1, y1); } }
-function addKg(S, levels) { const kg = levels / 255 * S.cfg.dust.kgPerTile / (S.SUB * S.SUB); S.can = Math.min(capKg(S), S.can + kg); }
+function addKg(S, levels) { const kg = levels / 255 * S.cfg.dust.kgPerTile * (planetDef(S).kgMult || 1) / (S.SUB * S.SUB); S.can = Math.min(capKg(S), S.can + kg); }
 function fillTile(S, i, level) { const SUB = S.SUB, c = i % C, r = (i / C) | 0; for (let y = 0; y < SUB; y++) S.sub.fill(level, (r * SUB + y) * S.MW + c * SUB, (r * SUB + y) * S.MW + c * SUB + SUB); markMask(S, c * SUB, r * SUB, c * SUB + SUB, r * SUB + SUB); }
 function refreshTile(S, i, collect) {
   if (S.dirt[i] === 0) return;
@@ -258,7 +267,7 @@ function refreshTile(S, i, collect) {
 function passTile(S, i, amt, collect) { // one pass over the whole tile (Keepers, tests)
   if (KIND[i] || S.dirt[i] <= 0 || !S.unlocked[SEC[i]]) return 0;
   if (collect && capKg(S) - S.can <= 1e-9) { S.blocked = S.t; return 0; }
-  const SUB = S.SUB, c = i % C, r = (i / C) | 0, lv = Math.round(255 * amt), before = S.dirt[i]; let got = 0;
+  const SUB = S.SUB, c = i % C, r = (i / C) | 0, lv = Math.round(255 * amt / (S.ever[i] ? 1 : passMult(S))), before = S.dirt[i]; let got = 0;
   for (let y = 0; y < SUB; y++) { const o = (r * SUB + y) * S.MW + c * SUB; for (let x = 0; x < SUB; x++) { const v = S.sub[o + x], d = Math.min(v, lv); S.sub[o + x] = v - d; got += d; } }
   if (collect) addKg(S, S.ever[i] ? got * S.cfg.storm.dustValue : got);
   markMask(S, c * SUB, r * SUB, c * SUB + SUB, r * SUB + SUB); refreshTile(S, i, collect);
@@ -278,7 +287,7 @@ function brushStamp(S, ax, ay, bx, by) {
   const td = toolDef(S), w = toolWidth(S), SUB = S.SUB, MW = S.MW, f = S.player.face, fx = Math.cos(f), fy = Math.sin(f);
   if (capKg(S) - S.can <= 1e-9) { S.blocked = S.t; return; }
   const round = td.brush === 'round', rad = (w + 2 * (td.suctionRadius || 0)) / 2 + (S.cfg.dust.brushPad || 0), hw = w / 2 + (S.cfg.dust.brushPad || 0), hd = S.cfg.dust.brushDepth / 2, ext = round ? rad : Math.hypot(hw, hd);
-  const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 0.2)), id = ++S.stampId, lv = Math.round(255 / td.passes), fid = ++S.footId;
+  const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 0.2)), id = ++S.stampId, lv = Math.round(255 / td.passes), lvF = Math.round(lv / passMult(S)), fid = ++S.footId;
   const x0 = Math.max(0, Math.floor((Math.min(ax, bx) - ext) * SUB)), x1 = Math.min(MW, Math.ceil((Math.max(ax, bx) + ext) * SUB));
   const y0 = Math.max(0, Math.floor((Math.min(ay, by) - ext) * SUB)), y1 = Math.min(S.MH, Math.ceil((Math.max(ay, by) + ext) * SUB));
   const touched = new Set(); let got = 0;
@@ -293,7 +302,7 @@ function brushStamp(S, ax, ay, bx, by) {
     S.subStamp[idx] = id; S.foot[i] = fid;
     if (prev === id - 1 || KIND[i] || !S.unlocked[SEC[i]] || S.dirt[i] === 0) continue;
     const v = S.sub[idx]; if (!v) continue;
-    const d = Math.min(v, lv); S.sub[idx] = v - d; got += S.ever[i] ? d * S.cfg.storm.dustValue : d; touched.add(i);
+    const d = Math.min(v, S.ever[i] ? lv : lvF); S.sub[idx] = v - d; got += S.ever[i] ? d * S.cfg.storm.dustValue : d; touched.add(i);
   }
   if (!touched.size) return; // storm dust may be worth 0 kg but its tiles still relight
   addKg(S, got); markMask(S, x0, y0, x1, y1);
@@ -399,6 +408,32 @@ function stepKeepers(S, dt) {
     else { k.x = tx; k.y = ty; if (k.target >= 0) { k.working = true; k.work += dt; if (k.work >= kc.secPerPass) { k.work = 0; const cash = passTile(S, k.target, kc.passPower, false) * S.cfg.storm.dustValue * S.cfg.dust.kgPerTile * S.cfg.dust.pricePerKg * payoutMult(S) * (kc.dustPay || 0); S.cash += cash; S.earned += cash; bin(S).sell += cash; } } }
   }
 }
+function pickHelperTarget(S, h) { // nearest fresh (never Lit) dirty tile in open sectors, not claimed by another Helper; Helpers stay out of
+  // the player's sector while another open sector still has fresh dust, so they never break up the player's strokes
+  const claimed = new Set(S.helpers.filter(o => o !== h && o.target >= 0).map(o => o.target)), ps = SEC[Math.floor(S.player.y) * C + Math.floor(S.player.x)] ?? -1;
+  const ok = i => !KIND[i] && !S.ever[i] && S.dirt[i] > 0 && S.unlocked[SEC[i]] && !claimed.has(i);
+  for (const avoid of [true, false]) { let bi = -1, bd = 1e9;
+    for (let i = 0; i < N; i++) if (ok(i) && !(avoid && SEC[i] === ps)) { const d = Math.abs(i % C + 0.5 - h.x) + Math.abs(((i / C) | 0) + 0.5 - h.y); if (d < bd) { bd = d; bi = i; } }
+    if (bi >= 0 || !avoid) return bi; }
+}
+function stepHelpers(S, dt) {
+  const hc = S.cfg.helper, home = { x: DEPOT.c + DEPOT.w + 0.6, y: DEPOT_C.y };
+  for (const h of S.helpers) {
+    const full = h.kg >= hc.capKg - 1e-9;
+    if (!full && h.target >= 0 && S.dirt[h.target] <= 0) { h.target = -1; h.retry = 0; }
+    if (!full && h.target < 0) { h.work = 0; h.retry = (h.retry || 0) - dt; if (h.retry <= 0) { h.target = pickHelperTarget(S, h); h.retry = h.target < 0 ? 1 : 0; } }
+    const goHome = full || (h.target < 0 && h.kg > 0), tx = goHome ? home.x : h.target >= 0 ? h.target % C + 0.5 : home.x + 1.5, ty = goHome ? home.y : h.target >= 0 ? ((h.target / C) | 0) + 0.5 : home.y + 3;
+    const dx = tx - h.x, dy = ty - h.y, d = Math.hypot(dx, dy), sp = hc.speed * dt; h.working = false;
+    if (d > sp) {
+      const ox = h.x, oy = h.y; h.x += dx / d * sp; h.y += dy / d * sp; h.face = Math.atan2(dy, dx);
+      if (pushOut(h, 0.35) && Math.hypot(h.x - ox, h.y - oy) < sp * 0.3) { const sg = h.id % 2 ? 1 : -1; h.x = ox - dy / d * sp * sg; h.y = oy + dx / d * sp * sg; pushOut(h, 0.35); }
+    } else {
+      h.x = tx; h.y = ty;
+      if (goHome) { if (h.kg > 0) { sellKg(S, h.kg); S.tele.helperKg = (S.tele.helperKg || 0) + h.kg; h.kg = 0; } }
+      else if (h.target >= 0) { h.working = true; if ((h.work += dt) >= hc.secPerPass) { h.work = 0; for (let o = -1; o <= 1; o++) { const j = h.target + o; if (((j / C) | 0) === ((h.target / C) | 0) && SEC[j] === SEC[h.target] && !S.ever[j]) h.kg += passTile(S, j, hc.passPower, false) * S.cfg.dust.kgPerTile * (planetDef(S).kgMult || 1); } } } // a 3-tile brush across the row
+    }
+  }
+}
 // dwell-to-trigger: true once the player has stood on `key` for `need` s; stepping off resets. S.ringP = progress for the foot ring.
 function dwell(S, key, on, dt, need) {
   const d = S.dw || (S.dw = {}); d[key] = on ? (d[key] || 0) + dt : 0;
@@ -423,7 +458,7 @@ function step(S, dt, input) {
   }
   const b = bin(S), inc = S.rate * dt; S.cash += inc; S.earned += inc; b.lit += inc;
   if ((S.linkT -= dt) <= 0) { S.linkT = S.cfg.lit.linkRecalcSec; recalcLinks(S); }
-  stepStorm(S, dt); stepKeepers(S, dt); stepHarden(S, dt);
+  stepStorm(S, dt); stepKeepers(S, dt); stepHelpers(S, dt); stepHarden(S, dt);
   if (S.stormOpen && S.stormed === 0) { S.stormOpen = false; ev(S, 'storm_cleared', { sec: +(S.t - S.storm.hitAt).toFixed(1) }); }
   if (S.everCount > 0) {
     const up = S.litCount / S.everCount; b.up += up * dt; b.w += dt;
@@ -439,7 +474,7 @@ function step(S, dt, input) {
 // planet (Moon / Mercury) + the props listed here. funnel.js validates exports against this and computes the playtest funnel.
 const EVENT_SCHEMA = {
   session_start: ['resumed', 'cfg'], session_end: ['dur'], ftue_step: ['step', 'id', 'waitSec'], first_lit: [],
-  upgrade_buy: ['id', 'lv', 'cost'], tool_buy: ['tier', 'id', 'cost'], keeper_hire: ['n', 'cost'], gate_open: ['sector', 'cost'],
+  upgrade_buy: ['id', 'lv', 'cost'], tool_buy: ['tier', 'id', 'cost'], keeper_hire: ['n', 'cost'], helper_hire: ['n', 'cost'], gate_open: ['sector', 'cost'],
   storm_hit: ['n', 'storm'], storm_cleared: ['sec'], launch: ['litPct', 'stardust', 'tier'], planet_enter: ['to', 'tool', 'stardust'],
   ad_offer: ['placement', 'stub'], ad_accept: ['placement', 'stub'],
 };
@@ -453,7 +488,7 @@ function rle(a) { const o = []; for (let i = 0; i < a.length;) { const v = a[i];
 function unrle(o, a) { let k = 0; for (let j = 0; j < o.length; j += 2) { a.fill(o[j], k, k + o[j + 1]); k += o[j + 1]; } if (k !== a.length) throw new Error('save: bad array length'); return a; }
 const SAVE_ARR = ['dirt', 'ever', 'hard', 'shineUntil', 'stormAt', 'linked', 'sub'];
 const SAVE_KEYS = ['t', 'rs', 'planet', 'cash', 'earned', 'spent', 'can', 'fuel', 'fuelShare', 'stardust', 'launches', 'tool', 'up', 'unlocked', 'gatePaid', 'litCount', 'everCount', 'stormed', 'linkedCount', 'rate', 'linkT', 'hardT', 'stormOpen',
-  'player', 'keepers', 'crewOpen', 'storm', 'chain', 'lastLitT', 'lastTone', 'blocked', 'milestone', 'zoomAt', 'tele', 'ftue', 'dw', 'dumpT', 'lastHead', 'footId', 'stampId', 'zonePaid', 'ringP'];
+  'player', 'keepers', 'helpers', 'crewOpen', 'storm', 'chain', 'lastLitT', 'lastTone', 'blocked', 'milestone', 'zoomAt', 'tele', 'ftue', 'dw', 'dumpT', 'lastHead', 'footId', 'stampId', 'zonePaid', 'ringP'];
 function serialize(S) {
   const o = { v: SAVE_VER, cfgHash: cfgHash(S.cfg), savedAt: Date.now(), s: {}, a: {} };
   for (const k of SAVE_KEYS) if (S[k] !== undefined) o.s[k] = S[k];
@@ -535,6 +570,7 @@ function botBuy(S, B) {
   if (canLaunch(S)) return 'launch';
   for (let guard = 0; guard < 30; guard++) {
     if (S.keepers.length < B.keepers && canBuy(S, 'keeper') && costOf(S, 'keeper') <= S.cash * 0.6) { buy(S, 'keeper'); continue; }
+    if (S.helpers.length < B.helpers && canBuy(S, 'helper') && costOf(S, 'helper') <= S.cash * 0.6) { buy(S, 'helper'); continue; }
     if (canBuy(S, 'tool')) { buy(S, 'tool'); continue; }
     const g = nextGate(S), save = Math.min(costOf(S, 'tool') ?? 1e12, g > 0 && B.cleanFrac >= 0.6 ? gateCost(S, g) : 1e12);
     const ups = UPS.filter(id => canBuy(S, id) && !(B.skipUps || []).includes(id)).sort((a, b) => B.upPick === 'cheap' ? costOf(S, a) - costOf(S, b) : upRank(S, a, B.upPick) - upRank(S, b, B.upPick) || costOf(S, a) - costOf(S, b));
@@ -546,10 +582,10 @@ function botBuy(S, B) {
   }
   return null;
 }
-function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true, upPick = 'balanced', skipUps = [], evFn = null } = {}) {
+function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true, upPick = 'balanced', skipUps = [], evFn = null, helpers = 4, keep = {} } = {}) {
   const cfg = deepMerge(clone(CONFIG), overrides); cfg.seed = seed;
-  const S = newGame(cfg, { headless: true, seed }); S.evFn = evFn; // evFn: collect analytics events from a bot run (funnel.js regression)
-  const B = { tile: -1, keepers, reclean, upgradeShare, cleanFrac: 0, noDirty: false, think: 0, upPick, skipUps };
+  const S = newGame(cfg, Object.assign({ headless: true, seed }, keep)); S.evFn = evFn; // evFn: collect analytics events from a bot run (funnel.js regression)
+  const B = { tile: -1, keepers, reclean, upgradeShare, cleanFrac: 0, noDirty: false, think: 0, upPick, skipUps, helpers };
   let launchInfo = null, idleUp = [0, 0];
   while (S.t < minutes * 60) {
     const idle = idleAfter != null && S.t >= idleAfter * 60;
@@ -567,7 +603,7 @@ function teleSummary(S) {
   const roll = (i, k) => full.slice(Math.max(0, i - 1), i + 2).reduce((a, m) => a + m[k], 0), beats = i => i >= full.length || roll(i, 'lit') > roll(i, 'sell');
   let cross = null; for (let i = 0; i < full.length; i++) if (beats(i) && beats(i + 1)) { cross = full[i].m; break; }
   return {
-    t: Math.round(S.t), firstLit: T.firstLit, firstUpgrade: T.firstUpgrade, keeper1: T.keeperAt[1], keeper3: T.keeperAt[3], tier2: T.tierAt[1], tier3: T.tierAt[2], tier4: T.tierAt[3], tier5: T.tierAt[4], tier6: T.tierAt[5], tierAtLaunch: S.tool + 1,
+    t: Math.round(S.t), firstLit: T.firstLit, firstUpgrade: T.firstUpgrade, keeper1: T.keeperAt[1], keeper3: T.keeperAt[3], tier2: T.tierAt[1], tier3: T.tierAt[2], tier4: T.tierAt[3], tier5: T.tierAt[4], tier6: T.tierAt[5], tierAtLaunch: S.tool + 1, helpers: S.helpers.length, helper1: T.helperAt[1], helperKg: Math.round(T.helperKg || 0),
     gates: Object.assign({}, T.gateAt), launchAt: T.launchAt, litBeatsSellMin: cross, storms: T.storms,
     uptimeK3: T.upK3[1] ? +(100 * T.upK3[0] / T.upK3[1]).toFixed(1) : null, uptimeK0: T.upK0[1] ? +(100 * T.upK0[0] / T.upK0[1]).toFixed(1) : null,
     up: Object.assign({}, S.up), moon: +(100 * S.everCount / SWEEPABLE).toFixed(1), lit: +(100 * S.litCount / SWEEPABLE).toFixed(1), fuel: Math.round(S.fuel), cash: Math.round(S.cash), minutes: mins,
@@ -696,7 +732,12 @@ function selfTest() {
   const Mo = newGame(clone(CONFIG), { headless: true }); Mo.tool = 4; Mo.stardust = 3; const lr = launch(Mo);
   const Me = newGame(clone(CONFIG), { headless: true, planet: Mo.planet + 1, tool: Mo.tool, stardust: Mo.stardust, launches: Mo.launches });
   Me.cash = 1e9; Me.unlocked[1] = true;
-  out.launchToPlanet2 = planetDef(Me).id === 'Mercury' && Me.tool === 4 && Me.stardust === 3 + lr.stardust && Me.launches === 1 && Me.litCount === 0 && nextGate(Me) === -1 && Me.sweepable > 0 && Me.sweepable < SWEEPABLE / 2;
+  out.launchToPlanet2 = planetDef(Me).id === 'Mercury' && Me.tool === 4 && Me.stardust === 3 + lr.stardust && Me.launches === 1 && Me.litCount === 0 && nextGate(Me) === 2 && Me.sweepable === SWEEPABLE && tankKg(Me) > tankKg(Mo);
+  // Helper Robot: Mercury only; sweeps fresh dust away from the player, sells its load at the Depot (cash + Fuel)
+  const Hm = newGame(clone(CONFIG), { headless: true, planet: 1 }); Hm.cash = 1e6; buy(Hm, 'helper');
+  for (let k = 0; k < 1200; k++) step(Hm, 0.05, null);
+  out.helperSweeps = costOf(Mo, 'helper') === null && Hm.helpers.length === 1 && Hm.everCount > 0 && Hm.fuel > 0 && (Hm.tele.helperKg || 0) > 0
+    && deserialize(clone(CONFIG), JSON.parse(JSON.stringify(serialize(Hm)))).helpers.length === 1;
   for (const [k, v] of Object.entries(out)) console.assert(v, 'selfTest failed: ' + k);
   out.pass = Object.values(out).every(v => v === true);
   return out;

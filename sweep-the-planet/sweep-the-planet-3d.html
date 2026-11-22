@@ -345,6 +345,7 @@ for (const [id, z] of Object.entries(ZONES)) {
   z.pad = padMesh(z.w, z.h, parseInt(z.bg.slice(1), 16)); z.pad.position.set(z.c + z.w / 2, 0.025, z.r + z.h / 2); scene.add(z.pad);
   z.label3d = labelSprite(); z.label3d.position.set(z.c + z.w / 2, 2.2, z.r + z.h / 2); z.label3d.userData.set(z.label, z.bg);
 }
+const sellPad = padMesh(SELL.w, SELL.h, 0xffd45e); sellPad.position.set(SELL.c + SELL.w / 2, 0.026, SELL.r + SELL.h / 2); scene.add(sellPad); // the sell trigger: a gold rim around the Depot
 const sellLabel = labelSprite(); sellLabel.position.set(DEPOT_C.x, 3.2, DEPOT_C.y); sellLabel.userData.set('SELL', '#FFF6E8');
 const gateGroup = new THREE.Group(); scene.add(gateGroup);
 const gateRing = padMesh(2, 2, 0xffc857); gateRing.position.y = 0.03; gateGroup.add(gateRing);
@@ -621,6 +622,7 @@ function updateWorld(S, realDt) {
     gateLabel.position.set(pd.c + pd.w / 2, 2.4, pd.r + pd.h / 2); gateLabel.userData.set('$' + fmt(cost - S.gatePaid));
   }
   syncReveal(S);
+  sellPad.material.uniforms.uOn.value = inRectT(S.player.x, S.player.y, SELL) ? 1 : S.can >= capKg(S) - 1e-6 ? 0.6 : 0.25;
   for (const [id, z] of Object.entries(ZONES)) {
     const on = inZone(S, z), U = z.pad.material.uniforms; U.uOn.value = on ? 1 : 0;
     if (z.kind !== 'pay') continue;

@@ -36,7 +36,7 @@
 <div id="err"></div>
 <div id="cap"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=ftue1"></script>
+<script src="sweep-sim.js?v=demo1"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -49,6 +49,11 @@ import * as THREE from 'three'; // importmap above: GLTFLoader imports the bare 
 import { GLTFLoader } from './lib/addons/loaders/GLTFLoader.js';
 // P0-2 creative capture: ?capture=s1|s2|s3 = UI-off 9:16 frame (390 x 693), fixed seed, scripted camera, record bar outside the frame.
 const CAPTURE = ((new URLSearchParams(location.search).get('capture') || '').toLowerCase().match(/^s[123]$/) || [null])[0];
+// ?demo=1 autoplay (video recording): fresh game, no localStorage reads or writes, normal view / camera / intro / FTUE; the sim bot
+// drives the player through the normal input + pad path. &speed=N multiplies sim speed, &tier=N starts with tool tier N (1 = Toothbrush).
+// window.__demo = { t, planet, tool, launches } each frame.
+const QS = new URLSearchParams(location.search), DEMO = !CAPTURE && QS.get('demo') === '1';
+const DEMO_SPEED = clamp(+QS.get('speed') || 1, 0.25, 20), DEMO_TIER = Math.max(1, Math.round(+QS.get('tier') || 1));
 const W = 390, H = CAPTURE ? 693 : 844, HUD_H = 60;
 // in-world pads: rects come from the sim (PADZ, clean foundation, each directly in front of its building). kind: 'sell' sells after
 // sellDwellSec (in the sim), 'panel' opens a sheet, 'pay' is a pay zone.
@@ -979,9 +984,9 @@ function toggleCheat() { cheatEl.style.display = cheatEl.style.display === 'bloc
 // kept in localStorage (LS.ev) and exported from the ⚙ panel. P0-6 save: full sim state (sweep-sim.js serialize) every 10 s and on
 // visibilitychange; a save made with another CONFIG is refused and the game resets with a warning. Capture mode never reads or writes.
 const LS = { save: 'stp.save', moon: 'stp.save.moon', ev: 'stp.events' };
-const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); return true; } catch { return false; } };
-const lsDel = k => { try { localStorage.removeItem(k); } catch { } };
+const lsGet = k => { if (DEMO) return null; try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { if (DEMO) return false; try { localStorage.setItem(k, v); return true; } catch { return false; } };
+const lsDel = k => { if (DEMO) return; try { localStorage.removeItem(k); } catch { } };
 const SESSION = Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36);
 let evLog = []; try { evLog = JSON.parse(lsGet(LS.ev) || '[]'); if (!Array.isArray(evLog)) evLog = []; } catch { evLog = []; }
 function logEv(name, props) { if (CAPTURE) return; evLog.push(Object.assign({ name, ts: Date.now(), session: SESSION }, props)); if (evLog.length > 20000) evLog.splice(0, evLog.length - 20000); }
@@ -1001,7 +1006,39 @@ function flyToNextPlanet() { // after the Launch popup: archive this planet, sta
   const P = G; if (!CAPTURE) lsSet(LS.moon + (P.planet ? '.' + P.planet : ''), JSON.stringify(serialize(P)));
   G = startGame({ planet: Math.min(P.planet + 1, P.cfg.planets.length - 1), tool: P.tool, stardust: P.stardust, launches: P.launches }, P.cfg); camState.init = false; rocket.position.y = 0;
 }
-let G = loadGame() || startGame(), speed = 1, fps = 0, frameMs = 0;
+let G = loadGame() || startGame(), speed = DEMO ? DEMO_SPEED : 1, fps = 0, frameMs = 0;
+if (DEMO) G.tool = Math.min(DEMO_TIER, CONFIG.tools.length) - 1;
+// demo autoplay: botMove (sweep strokes, Sell pad, gates) plus pad trips for what botBuy would buy: Upgrades (taps the sheet row),
+// Tool Rack / Crew Bay / Helper pay zones, Launch (taps the sheet button) and the Launch popup (taps after 2.5 s)
+const demoB = { tile: -1, keepers: 3, helpers: 4, reclean: 'near', upgradeShare: 0.2, cleanFrac: 0, noDirty: false, upPick: 'balanced', skipUps: [] };
+let demoGoal = null, demoThinkT = 0, demoTapT = 0, demoPopT = 0;
+const demoSig = S => [S.tool, S.keepers.length, S.helpers.length, S.launches, ...UPS.map(id => S.up[id])].join();
+function demoPick(S) {
+  demoB.cleanFrac = unlockedClean(S);
+  if (S.can >= capKg(S) - 1e-6) return null;
+  if (canLaunch(S)) return { zone: 'launch' };
+  if (S.keepers.length < demoB.keepers && canBuy(S, 'keeper') && costOf(S, 'keeper') <= S.cash * 0.6) return { zone: 'crew' };
+  if (S.helpers.length < demoB.helpers && canBuy(S, 'helper') && costOf(S, 'helper') <= S.cash * 0.6) return { zone: 'helper' };
+  if (canBuy(S, 'tool')) return { zone: 'tool' };
+  const g = nextGate(S), save = Math.min(costOf(S, 'tool') ?? 1e12, g > 0 && demoB.cleanFrac >= 0.6 ? gateCost(S, g) : 1e12);
+  const ups = UPS.filter(id => canBuy(S, id)).sort((a, b) => upRank(S, a, 'balanced') - upRank(S, b, 'balanced') || costOf(S, a) - costOf(S, b));
+  if (!ups.length) return null;
+  const c = costOf(S, ups[0]);
+  if (save < 1e12 && S.cash - c < save && c > save * demoB.upgradeShare && S.tele.firstUpgrade != null) return null;
+  if (c > S.cash * (S.tele.firstUpgrade == null ? 1 : 0.5)) return null; // same rule as botBuy
+  return { zone: 'terminal', buy: ups[0] };
+}
+function demoInput(S, dt) {
+  if (G.popup) { if (G.popup.kind === 'launch' && (demoPopT += dt) > 2.5) { demoPopT = 0; flyToNextPlanet(); } return null; }
+  if ((demoThinkT -= dt) <= 0) { demoThinkT = 1; if (!demoGoal) { demoGoal = demoPick(S); if (demoGoal) Object.assign(demoGoal, { sig: demoSig(S), until: S.t + 15 }); } }
+  if (demoGoal && (demoSig(S) !== demoGoal.sig || S.t > demoGoal.until || S.can >= capKg(S) - 1e-6)) { demoGoal = null; demoThinkT = 0.6; }
+  if (!demoGoal) return botMove(S, demoB);
+  const z = ZONES[demoGoal.zone];
+  if (!inZone(S, z)) return steer(S, demoB, toward(S.player, z.c + z.w / 2, z.r + z.h / 2));
+  const sid = activeSheet(S); // on the pad: stand; panels open after the dwell, then "tap" like a player would
+  if (sid && (demoTapT += dt) > 0.6) { demoTapT = 0; if (sid === 'launch') startLaunch(S); else if (sid === 'terminal' && demoGoal.buy) buy(S, demoGoal.buy); }
+  return null;
+}
 const LOAD = { firstFrame: null, assets: null, resumed: G.t > 0 };
 ev(G, 'session_start', { resumed: LOAD.resumed, cfg: cfgHash(CONFIG) });
 let sessionAt = performance.now();
@@ -1160,9 +1197,10 @@ function tick(now) { // one frame (frame() = tick + next rAF; tests call SP.tick
   if (LOAD.firstFrame == null) LOAD.firstFrame = t0; else if (now > last) FT[ftN++ % FT.length] = now - last;
   last = Math.max(last, now); // SP.tick (tests) may run ahead of the rAF clock
   if (cine && (cine.t += real) >= CINE_SEC) { G.popup = Object.assign({ kind: 'launch' }, cine.info); cine = null; if (CAPTURE) { G.popup = null; flyToNextPlanet(); } }
+  if (DEMO) { if (G.popup) demoInput(G, real); window.__demo = { t: G.t, planet: G.planet, tool: G.tool + 1, launches: G.launches }; }
   if (G.popup && G.popup.kind === 'offline' && !G.popup.offered) { G.popup.offered = true; ev(G, 'ad_offer', { placement: 'offline_x2', stub: true }); }
   if (CAPTURE) stepCapture(real);
-  if (!G.popup && !cine) { let rem = real * speed; const inp = CAPTURE ? capInput() : inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); stepPayZones(G, d); rem -= d; } }
+  if (!G.popup && !cine) { let rem = real * speed; const inp = CAPTURE ? capInput() : DEMO ? demoInput(G, real * speed) : inputVec(); while (rem > 1e-6) { const d = Math.min(0.05, rem); step(G, d, inp); stepPayZones(G, d); rem -= d; } }
   moneyFlows(G, real);
   updateWorld(G, real); renderer.render(scene, camera); drawOverlay(G);
   frameMs += (performance.now() - t0 - frameMs) * 0.05;

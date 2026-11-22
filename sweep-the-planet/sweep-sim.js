@@ -8,7 +8,7 @@
 // a 100% clean tile is Lit and pays $/s while it stays clean; Dust Storms re-dust Lit tiles; Keeper Drones re-clean them.
 // ===== CONFIG: every tunable lives here (concept §13.2; values changed by greybox tuning are marked "tuned") =====
 const CONFIG = {
-  grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 50, 250, 900, 1650, 5000] }, // tuned (2026-11-22 tool ladder: 2000/6000 -> 1700/5000; pass 4 base plaza on the left, longer sell trips: 1700 -> 1450; pass 4 balancing caps freed cash: 800/1450 -> 900/1650; launch 26-29 min) (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
+  grid: { cols: 48, rows: 72, tilePx: 16, sectors: 6, sectorGateCost: [0, 60, 550, 2600, 5000, 6500] }, // tuned (2026-11-22 tool ladder: 2000/6000 -> 1700/5000; pass 4 base plaza on the left, longer sell trips: 1700 -> 1450; pass 4b: steeper gates so upgrades beat a no-upgrade rush; launch 26-29 min) (concept 300/1500/6000/20000: bot idled 10+ min waiting for gates) // cols/rows/sectors fixed in this greybox (gate pads are hand-placed)
   player: { speed: 5.4 /* tiles per second; 4.0 tile greybox, 4.8 fine dust mask, 5.4 with buildings and rocks to walk around */ },
   // pricePerKg: concept 1.0, 4.0 in the tile greybox, 4.5 with the fine dust mask, 5.0 with collision. sub = mask cells per tile side; a tile is Lit at
   // >= litCleanFrac clean cells; brushDepth = brush size along the facing; brushPad = brush a bit wider than `width` so strokes overlap.
@@ -32,11 +32,11 @@ const CONFIG = {
   // cost = base * growth^level. Speed: steeper growth, a short ladder and a hard cap on the bonus over the tier's base speed
   // (vehicles scale it by speedUpScale). Payout (sell) and Panel Boost (Lit $/s) multiply different income streams, so they never stack.
   upgrades: {
-    capacity: { base: 60, growth: 1.15, step: 0.2, decay: 0.015, max: 10 },   // +20%, +18.5%, ... = +132% at Lv 10
+    capacity: { base: 30, growth: 1.15, step: 0.4, decay: 0.05, max: 10 },    // +40%, +35%, +30%, ... = +175% at Lv 10 (strong early levels)
     width: { base: 800, growth: 1.15, step: 1, decay: 0, max: 2 },            // +1 tile per level, +2 max
     speed: { base: 100, growth: 1.28, step: 0.08, decay: 0.006, max: 8, cap: 0.45 }, // +8%, +7.4%, ... capped at +45%
-    payout: { base: 160, growth: 1.17, step: 0.15, decay: 0.01, max: 10 },    // +15%, +14%, ... = +105% at Lv 10
-    panelBoost: { base: 240, growth: 1.17, step: 0.15, decay: 0.01, max: 10 },
+    payout: { base: 100, growth: 1.17, step: 0.5, decay: 0.08, max: 8 },       // +50%, +42%, +34%, ... = +176% at Lv 8
+    panelBoost: { base: 70, growth: 1.17, step: 0.5, decay: 0.08, max: 8 },    // as Payout, on Lit $/s
   },
   storm: { intervalSec: 90, warningSec: 8, litFraction: 0.10, dirtAfter: 0.5, firstStormAtSec: 130, firstStormTiles: 6, bandRows: 16, frontSec: 4, samples: 4 },
   keeper: { cost: [0, 150, 600, 2000, 6000, 15000], max: 6, secPerPass: 0.5, speed: 3.0, passPower: 0.5 }, // secPerPass tuned (concept 1.5: 3 Keepers held only 85%)
@@ -470,6 +470,9 @@ function botMove0(S, B) {
   return { x: B.dir, y: clamp((ty - p.y) * 3, -0.4, 0.4) };
 }
 function toward(p, x, y) { const dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy); return d < 0.05 ? null : { x: dx / d, y: dy / d }; }
+// bot upgrade order: 'even' = lowest level first; 'balanced' = the same, but the income branches (Capacity, Payout, Panel Boost)
+// lead by 2 levels before Speed / Width; 'cheap' = cheapest first (sorted by cost directly)
+const upRank = (S, id, pick) => S.up[id] + (pick === 'balanced' && (id === 'speed' || id === 'width') ? 2 : 0);
 function botBuy(S, B) {
   B.cleanFrac = unlockedClean(S);
   if (canLaunch(S)) return 'launch';
@@ -477,7 +480,7 @@ function botBuy(S, B) {
     if (S.keepers.length < B.keepers && canBuy(S, 'keeper') && costOf(S, 'keeper') <= S.cash * 0.6) { buy(S, 'keeper'); continue; }
     if (canBuy(S, 'tool')) { buy(S, 'tool'); continue; }
     const g = nextGate(S), save = Math.min(costOf(S, 'tool') ?? 1e12, g > 0 && B.cleanFrac >= 0.6 ? gateCost(S, g) : 1e12);
-    const ups = UPS.filter(id => canBuy(S, id) && !(B.skipUps || []).includes(id)).sort((a, b) => B.upPick === 'even' ? S.up[a] - S.up[b] || costOf(S, a) - costOf(S, b) : costOf(S, a) - costOf(S, b));
+    const ups = UPS.filter(id => canBuy(S, id) && !(B.skipUps || []).includes(id)).sort((a, b) => B.upPick === 'cheap' ? costOf(S, a) - costOf(S, b) : upRank(S, a, B.upPick) - upRank(S, b, B.upPick) || costOf(S, a) - costOf(S, b));
     if (!ups.length) break;
     const c = costOf(S, ups[0]);
     if (save < 1e12 && S.cash - c < save && c > save * B.upgradeShare) break;
@@ -486,7 +489,7 @@ function botBuy(S, B) {
   }
   return null;
 }
-function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true, upPick = 'cheap', skipUps = [] } = {}) {
+function runBot({ minutes = 45, seed = 1, keepers = 3, reclean = 'near', idleAfter = null, upgradeShare = 0.2, eff = 0.75, overrides = {}, dt = 0.05, stopAtLaunch = true, upPick = 'balanced', skipUps = [] } = {}) {
   const cfg = deepMerge(clone(CONFIG), overrides); cfg.seed = seed;
   const S = newGame(cfg, { headless: true, seed });
   const B = { tile: -1, keepers, reclean, upgradeShare, cleanFrac: 0, noDirty: false, think: 0, upPick, skipUps };

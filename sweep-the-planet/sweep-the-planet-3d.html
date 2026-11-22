@@ -31,7 +31,7 @@
 <div id="cheat"></div>
 <div id="err"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=pass2"></script>
+<script src="sweep-sim.js?v=pass3"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -53,7 +53,7 @@ const ZONES = {
   refinery: Object.assign({ kind: 'panel', label: 'REFINERY', bg: PAL.purple }, PADZ.refinery),
   launch: Object.assign({ kind: 'panel', label: 'LAUNCH', bg: PAL.orange }, PADZ.launch),
 };
-const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 21, follow: 6, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 1.4 };
+const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 21, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.45 };
 const errBox = document.getElementById('err');
 addEventListener('error', e => { errBox.style.display = 'block'; errBox.textContent += (e.message || e) + '\n'; });
 
@@ -97,10 +97,11 @@ function blob(parent, sx, sz, x = 0, z = 0) { const m = new THREE.Mesh(blobGeo, 
 // ===== Station deck + Lit look =====
 // Fiction: a buried moon station deck lies under the regolith; sweeping it brings the station back online (Clean = Power).
 // Dust IS the moon's regolith: same colour and grain as the terrain around the map (REGOLITH_GLSL is shared by both shaders), so
-// dirty deck, map edge and moon read as one surface. Clean deck = composite panels (seams, bolts, vents) with an inset light strip.
-// LIT_LOOK + deckSurface() below are the single place for the clean / Lit look: when a tile turns Lit its strip powers up with a
-// short warm flicker (flickerSec); a storm-dusted tile goes dark; the Grid Link = glowing conduits in the deck toward the Depot.
-const LIT_LOOK = { deck: 0xa9a3b8, seam: 0x5b556c, strip: 0xffc47a, stripOff: 0x4d475e, link: 0xffa94d, linkWidth: 0.05, linkGlow: 0.85, gloss: 0.3, flickerSec: 0.7, unpowered: 0.8 };
+// dirty deck, map edge and moon read as one surface. Clean deck = calm, big plates (plate x plate tiles) with thin low-contrast seams;
+// the seams are the light lanes: each tile next to a seam carries a short lane light that powers up (warm flicker, flickerSec) when the
+// tile turns Lit, and the Lit tile brightens its plate softly. Hatches on ~1 in 12 plates. A storm-dusted tile goes dark (unpowered).
+// Grid Link = the lane seam glowing warm, pulsing toward the Depot. LIT_LOOK + deckSurface() are the single place for this look.
+const LIT_LOOK = { deck: 0xa49eb3, seam: 0x6f6982, strip: 0xffc47a, stripOff: 0x7d778f, link: 0xffa94d, linkGlow: 0.5, gloss: 0.12, flickerSec: 0.7, unpowered: 0.9, plate: 4, hatchOdds: 1 / 12 };
 const GROUND = { regolith: 0x9a91a8, trim: 0x8a8399, marker: 0xff8a3d };
 const SETTLE_SEC = 1.2; // storm dust settles into the mask over this long (no floor wave)
 const sunU = { value: sun.position.clone().normalize() }, regU = { value: v3(GROUND.regolith) }, alarmU = { value: 0 };
@@ -110,9 +111,9 @@ const REGOLITH_GLSL = `
     uniform vec3 uSun; uniform vec3 uReg; uniform float uAlarm;
     // moon regolith: one colour, two grain scales, soft large blotches, lit by the sun through a fluffy normal
     vec3 regolith(vec2 g, vec3 N0){
-      float fluff = vn(g * 14.0) * 0.6 + vn(g * 42.0) * 0.4;
-      vec3 N = normalize(N0 + vec3((fluff - 0.5) * 0.45, 0.0, (vn(g * 14.0 + 5.0) - 0.5) * 0.45));
-      return uReg * (0.86 + 0.24 * fluff) * (0.92 + 0.12 * vn(g * 0.35)) * (0.7 + 0.42 * max(dot(N, uSun), 0.0));
+      float fluff = vn(g * 2.6) * 0.6 + vn(g * 7.0) * 0.4;                                     // low-frequency, low-contrast: soft dust, not static
+      vec3 N = normalize(N0 + vec3((fluff - 0.5) * 0.2, 0.0, (vn(g * 2.6 + 5.0) - 0.5) * 0.2));
+      return uReg * (0.94 + 0.09 * fluff) * (0.95 + 0.07 * vn(g * 0.35)) * (0.76 + 0.32 * max(dot(N, uSun), 0.0));
     }
     vec3 alarm(vec3 c){ return mix(c, vec3(1.0, 0.25, 0.2), uAlarm * 0.16); }`;
 
@@ -127,66 +128,65 @@ const groundMat = new THREE.ShaderMaterial({
   uniforms: {
     uTiles: { value: tileTex }, uMask: { value: maskTex }, uMaskSize: { value: new THREE.Vector2(1, 1) }, uTime: { value: 0 }, uGrid: { value: new THREE.Vector2(C, R) },
     uSun: sunU, uReg: regU, uAlarm: alarmU, uDeck: { value: v3(LIT_LOOK.deck) }, uSeam: { value: v3(LIT_LOOK.seam) }, uStrip: { value: v3(LIT_LOOK.strip) }, uStripOff: { value: v3(LIT_LOOK.stripOff) },
-    uLink: { value: v3(LIT_LOOK.link) }, uLinkW: { value: LIT_LOOK.linkWidth }, uLinkGlow: { value: LIT_LOOK.linkGlow }, uGloss: { value: LIT_LOOK.gloss }, uUnpow: { value: LIT_LOOK.unpowered },
+    uLink: { value: v3(LIT_LOOK.link) }, uPlate: { value: LIT_LOOK.plate }, uHatch: { value: LIT_LOOK.hatchOdds }, uLinkGlow: { value: LIT_LOOK.linkGlow }, uGloss: { value: LIT_LOOK.gloss }, uUnpow: { value: LIT_LOOK.unpowered },
     uTrim: { value: v3(GROUND.trim) }, uMarker: { value: v3(GROUND.marker) },
   },
   vertexShader: 'varying vec2 vUv; varying vec3 vWorld; void main(){ vUv = uv; vWorld = (modelMatrix * vec4(position, 1.0)).xyz; gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0); }',
   fragmentShader: `
     precision highp float; uniform sampler2D uTiles; uniform sampler2D uMask; uniform vec2 uMaskSize; uniform float uTime; uniform vec2 uGrid;
-    uniform vec3 uDeck; uniform vec3 uSeam; uniform vec3 uStrip; uniform vec3 uStripOff; uniform vec3 uLink; uniform float uLinkW; uniform float uLinkGlow; uniform float uGloss; uniform float uUnpow;
+    uniform vec3 uDeck; uniform vec3 uSeam; uniform vec3 uStrip; uniform vec3 uStripOff; uniform vec3 uLink; uniform float uPlate; uniform float uHatch; uniform float uLinkGlow; uniform float uGloss; uniform float uUnpow;
     uniform vec3 uTrim; uniform vec3 uMarker; varying vec2 vUv; varying vec3 vWorld;
     ${REGOLITH_GLSL}
     float bit(float f, float b){ return mod(floor(f / b), 2.0); }
-    // ---- station deck panel (values from LIT_LOOK); on = strip power 0..1 ----
-    vec3 deckSurface(vec2 g, vec2 f, vec2 cell, float on, float linked, float dirP, float dist, float shine){
-      vec2 e = min(f, 1.0 - f); float m = min(e.x, e.y), seam = 1.0 - smoothstep(0.02, 0.04, m), inset = smoothstep(0.04, 0.085, m);
-      vec3 col = uDeck * (0.93 + 0.07 * h(cell)) * (0.92 + 0.08 * inset);
-      float hi = (1.0 - smoothstep(0.04, 0.08, f.x)) + (1.0 - smoothstep(0.04, 0.08, f.y)), lo = (1.0 - smoothstep(0.04, 0.08, 1.0 - f.x)) + (1.0 - smoothstep(0.04, 0.08, 1.0 - f.y));
-      col *= 1.0 + (0.1 * hi - 0.12 * lo) * (1.0 - seam);                                       // bevelled panel edge
-      col = mix(col, uSeam, seam);
-      float bolt = 1.0 - smoothstep(0.022, 0.036, length(abs(f - 0.5) - vec2(0.38)));
-      col = mix(col, uSeam * 1.25, bolt * 0.85);
-      if (h(cell + 3.7) > 0.72) { float sl = step(0.3, f.y) * step(f.y, 0.62) * step(0.28, f.x) * step(f.x, 0.72) * step(0.5, fract(f.x * 10.0)); col = mix(col, uSeam, sl * 0.8); } // vent
-      bool vt = mod(cell.x + cell.y, 2.0) > 0.5; vec2 sp = vt ? f.yx : f;                         // light strip, alternating direction
-      float strip = step(0.2, sp.x) * step(sp.x, 0.8) * (1.0 - smoothstep(0.025, 0.04, abs(sp.y - 0.8)));
-      col = mix(col, mix(uStripOff, uStrip * 1.35, on), strip);
-      col += uStrip * on * 0.28 * exp(-abs(sp.y - 0.8) * 16.0) * step(0.16, sp.x) * step(sp.x, 0.84);
-      vec3 V = normalize(cameraPosition - vWorld); col += uGloss * pow(max(dot(reflect(-uSun, vec3(0.0, 1.0, 0.0)), V), 0.0), 24.0) * (1.0 - seam);
-      if (shine > 0.5) col += 0.05 * (0.6 + 0.4 * sin(uTime * 3.0 + cell.x));                    // Mop: still wet
-      if (linked > 0.5) { // Grid Link conduit: recessed channel from the tile centre toward the parent, glowing core pulsing toward the Depot
-        vec2 q = f - 0.5; float along = dirP < 0.5 ? -q.x : dirP < 1.5 ? q.x : dirP < 2.5 ? -q.y : q.y, across = dirP < 1.5 ? q.y : q.x;
-        float ch = step(-uLinkW, along) * (1.0 - smoothstep(uLinkW, uLinkW * 1.4, abs(across)));
-        float core = step(-uLinkW, along) * (1.0 - smoothstep(uLinkW * 0.3, uLinkW * 0.6, abs(across)));
-        float node = 1.0 - smoothstep(uLinkW * 1.4, uLinkW * 2.2, length(q));
-        float pulse = 0.5 + 0.5 * sin((dist - along) * 1.3 + uTime * 5.0);
-        col = mix(col, uSeam * 0.8, max(ch, node) * 0.8);
-        col = mix(col, uLink, max(core, node * 0.7) * uLinkGlow * (0.55 + 0.45 * pulse));
+    // ---- station deck (values from LIT_LOOK); on = lane light power 0..1. Every line is anti-aliased with fwidth (no shimmer) ----
+    vec3 deckSurface(vec2 g, vec2 cell, vec2 f, float on, float linked, float dist, float shine){
+      float w = max(fwidth(g.x), fwidth(g.y)), P = uPlate;
+      vec2 pc = floor(g / P), pe = abs(fract(g / P + 0.5) - 0.5) * P;                     // pe = distance (tiles) to the nearest plate seam per axis
+      float sd = min(pe.x, pe.y);
+      vec3 col = uDeck * (0.98 + 0.04 * h(pc)) * (0.975 + 0.025 * smoothstep(0.0, 0.6, sd));  // gentle tone per plate, soft bevel to the seam
+      col = mix(col, uSeam, (1.0 - smoothstep(0.03, 0.03 + 1.5 * w, sd)) * 0.5);           // thin seam
+      if (h(pc + 7.13) < uHatch) {                                                          // sparse hatch, same orientation everywhere
+        vec2 q = (fract(g / P) - 0.5) * P; float r = length(q);
+        float ring = 1.0 - smoothstep(0.04, 0.04 + 1.5 * w, abs(r - 0.85));
+        float slat = step(r, 0.62) * (1.0 - smoothstep(0.035, 0.035 + 1.5 * w, abs(fract(q.y / 0.3) - 0.5) * 0.3));
+        col = mix(col, uSeam, max(ring, slat * 0.7) * 0.4);
+      }
+      // lane light: a short strip 0.16 tile inside the seam on tiles that touch one (cells on the plate's outer ring)
+      vec2 cp = mod(cell, P); float lane = 0.0, acr = 9.0;
+      if (cp.x < 0.5 || cp.x > P - 1.5) { float a = abs((cp.x < 0.5 ? f.x : 1.0 - f.x) - 0.16); acr = min(acr, a); lane = max(lane, (1.0 - smoothstep(0.035, 0.035 + w, a)) * (1.0 - smoothstep(0.3, 0.3 + w, abs(f.y - 0.5)))); }
+      if (cp.y < 0.5 || cp.y > P - 1.5) { float a = abs((cp.y < 0.5 ? f.y : 1.0 - f.y) - 0.16); acr = min(acr, a); lane = max(lane, (1.0 - smoothstep(0.035, 0.035 + w, a)) * (1.0 - smoothstep(0.3, 0.3 + w, abs(f.x - 0.5)))); }
+      col *= mix(uUnpow, 1.04, on);                                                         // a Lit tile brightens its patch of plate softly
+      col = mix(col, mix(uStripOff, uStrip * 1.1, on), lane * mix(0.35, 0.8, on));
+      col += uStrip * on * 0.12 * exp(-acr * 10.0) * step(acr, 8.0);                       // soft spill from the lane light
+      vec3 V = normalize(cameraPosition - vWorld); col += uGloss * pow(max(dot(reflect(-uSun, vec3(0.0, 1.0, 0.0)), V), 0.0), 6.0);
+      if (shine > 0.5) col += 0.04 * (0.6 + 0.4 * sin(uTime * 3.0 + cell.x * 0.5));       // Mop: still wet
+      if (linked > 0.5) {                                                                    // Grid Link: the lane seam glows, pulse flows toward the Depot
+        float core = 1.0 - smoothstep(0.03, 0.03 + 1.5 * w, sd), pulse = 0.5 + 0.5 * sin(dist * 1.3 + uTime * 5.0);
+        col = mix(col, uLink, core * step(acr, 8.0) * uLinkGlow * (0.55 + 0.45 * pulse));
       }
       return col;
     }
     void main(){
       vec2 g = vec2(vUv.x * uGrid.x, (1.0 - vUv.y) * uGrid.y), cell = floor(g), f = fract(g), mu = g / uGrid;
       vec4 t = texture2D(uTiles, (cell + 0.5) / uGrid);
-      float dirt = t.r, fl = floor(t.g * 255.0 + 0.5), b = floor(t.b * 255.0 + 0.5), dirP = floor(b / 64.0), dist = mod(b, 64.0), age = t.a;
+      float dirt = t.r, fl = floor(t.g * 255.0 + 0.5), b = floor(t.b * 255.0 + 0.5), dist = mod(b, 64.0), age = t.a;
       float ever = bit(fl, 1.0), linked = bit(fl, 2.0), locked = bit(fl, 4.0), plate = bit(fl, 8.0), shine = bit(fl, 16.0), gate = bit(fl, 32.0), settle = bit(fl, 64.0), rock = bit(fl, 128.0);
       vec3 col;
-      if (plate > 0.5) col = deckSurface(g, f, cell, 1.0, 0.0, 0.0, 0.0, 0.0) * 1.05;       // foundations: station already powered
+      if (plate > 0.5) col = deckSurface(g, cell, f, 1.0, 0.0, 0.0, 0.0);                   // foundations: station already powered
       else if (rock > 0.5) col = regolith(g, vec3(0.0, 1.0, 0.0)) * 0.92;
       else {
         float lit = dirt < 0.003 && ever > 0.5 ? 1.0 : 0.0;
         float on = lit * (settle < 0.5 && age < 0.999 ? step(0.4, h(cell + floor(age * 14.0))) * smoothstep(0.0, 0.15, age) + step(0.85, age) * 0.6 : 1.0); // power-up flicker
-        col = deckSurface(g, f, cell, on, linked * lit, dirP, dist, shine * lit);
-        if (lit < 0.5) col *= uUnpow;                                                           // dark, unpowered deck (also after a storm)
+        col = deckSurface(g, cell, f, on, linked * lit, dist, shine * lit);                // unlit = dark, unpowered deck (also after a storm)
         // regolith dust from the mask: soft height normal from its gradient, darker rim at the clean edge, contact shade on the clean side
-        vec2 px = 1.0 / uMaskSize; float d = texture2D(uMask, mu).r;
-        float gx = texture2D(uMask, mu + vec2(px.x, 0.0)).r - texture2D(uMask, mu - vec2(px.x, 0.0)).r;
-        float gy = texture2D(uMask, mu + vec2(0.0, px.y)).r - texture2D(uMask, mu - vec2(0.0, px.y)).r;
+        vec2 px = 1.0 / uMaskSize; float d0 = texture2D(uMask, mu).r;
+        float dR = texture2D(uMask, mu + vec2(px.x, 0.0)).r, dL = texture2D(uMask, mu - vec2(px.x, 0.0)).r, dU = texture2D(uMask, mu + vec2(0.0, px.y)).r, dD = texture2D(uMask, mu - vec2(0.0, px.y)).r;
+        float gx = dR - dL, gy = dU - dD, d = (2.0 * d0 + dR + dL + dU + dD) / 6.0;          // 1-cell feather: soft edge, no stair steps
         if (settle > 0.5) d *= smoothstep(0.0, 1.0, age);                                       // storm dust settles in
-        float cover = smoothstep(0.03, 0.12, d);
-        vec3 dust = regolith(g, vec3(-gx * 2.2, 1.0, -gy * 2.2));
-        dust *= 1.0 - 0.3 * (cover - smoothstep(0.12, 0.35, d));
-        col *= 1.0 - 0.2 * smoothstep(0.0, 0.05, d) * (1.0 - cover);
-        col = mix(col, dust, cover * mix(0.4, 1.0, d * d));
+        float cover = smoothstep(0.02, 0.3, d);
+        vec3 dust = regolith(g, vec3(-gx * 1.1, 1.0, -gy * 1.1));
+        dust *= 1.0 - 0.12 * (cover - smoothstep(0.3, 0.6, d));                                // faint rim where the dust thins
+        col = mix(col, dust, cover * mix(0.55, 1.0, d));
       }
       if (locked > 0.5) { // sealed sector: hull rim and a closed hatch marker show faintly through the dust
         vec2 sq = g - (floor(g / 24.0) * 24.0 + 12.0), se = min(mod(g, 24.0), 24.0 - mod(g, 24.0));
@@ -232,12 +232,14 @@ scene.add(new THREE.Mesh(groundGeo, groundMat));
 const terrainMat = new THREE.ShaderMaterial({ uniforms: { uSun: sunU, uReg: regU, uAlarm: alarmU },
   vertexShader: 'varying vec3 vW; varying vec3 vN; void main(){ vW = (modelMatrix * vec4(position, 1.0)).xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0); }',
   fragmentShader: 'precision highp float; varying vec3 vW; varying vec3 vN;' + REGOLITH_GLSL + ' void main(){ gl_FragColor = vec4(alarm(regolith(vW.xz, normalize(vN))), 1.0); }' });
+const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 2, z: 64.5 }, INTRO_F = { x: 2, z: 62 }; // hub dome centre (world); camera focus near the base
 const MOON_R = 150, MOON_C = new THREE.Vector3(C / 2, -0.4 - MOON_R, R / 2);
 const CRATERS = [[-14, 20, 5], [62, 8, 7], [58, 60, 4.5], [-10, 66, 6], [20, -12, 6], [70, 90, 8], [-22, 45, 4], [30, 86, 5], [80, 35, 5], [5, 95, 7], [-40, -10, 9], [95, 70, 9]];
 function terrainH(x, z) {
   const dd = Math.hypot(Math.max(-x, x - C, 0), Math.max(-z, z - R, 0)), r = Math.hypot(x - C / 2, z - R / 2);
   const sph = -0.4 - (MOON_R - Math.sqrt(Math.max(0, MOON_R * MOON_R - r * r))), k = clamp(dd / 30, 0, 1), ramp = clamp(dd / 3, 0, 1);
   let y = lerp(-0.06, sph, k * k * (3 - 2 * k)) + ramp * (Math.sin(x * 0.31) * Math.cos(z * 0.27) * 0.35 + Math.sin(x * 0.9 + z * 0.7) * 0.12);
+  const hd = Math.hypot(x - HUB_W.x, z - HUB_W.z); if (hd < 5.2) y = lerp(-0.06, y, clamp((hd - 3.4) / 1.8, 0, 1));
   for (const [cx, cz, cr] of CRATERS) { const d = Math.hypot(x - cx, z - cz) / cr; if (d < 1) y -= cr * 0.07 * (1 - d * d); else if (d < 1.7) y += cr * 0.03 * Math.exp(-(((d - 1) * 4) ** 2)); }
   return y;
 }
@@ -268,7 +270,7 @@ const rockSolid = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42), 
 const rockDecor = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.42), toon(0x8c86a0, {}, false), 220);
 { const rnd = mulberry32(11);
   ROCKS.forEach((k, i) => { tmpQ.setFromEuler(new THREE.Euler(0, rnd() * 6.3, 0)); rockSolid.setMatrixAt(i, tmpM.compose(tmpV.set(k.x, 0, k.y), tmpQ, tmpS.setScalar(k.rad / 0.4))); });
-  let n = 0; while (n < 220) { const x = -26 + rnd() * (C + 52), z = -26 + rnd() * (R + 52), dd = Math.hypot(Math.max(-x, x - C, 0), Math.max(-z, z - R, 0)); if (dd < 0.8 || dd > 24) continue;
+  let n = 0; while (n < 220) { const x = -26 + rnd() * (C + 52), z = -26 + rnd() * (R + 52), dd = Math.hypot(Math.max(-x, x - C, 0), Math.max(-z, z - R, 0)); if (dd < (n < 60 ? 0.8 : 2.5) || dd > 24 || Math.hypot(x - HUB_W.x, z - HUB_W.z) < 5.5) continue;
     const sc = n < 60 ? 0.8 + rnd() * 1.6 : 0.25 + rnd() * 0.35; tmpQ.setFromEuler(new THREE.Euler(rnd() * 0.4, rnd() * 6.3, 0)); rockDecor.setMatrixAt(n++, tmpM.compose(tmpV.set(x, terrainH(x, z) - 0.05, z), tmpQ, tmpS.setScalar(sc))); }
   scene.add(rockSolid, rockDecor); }
 
@@ -286,6 +288,10 @@ const launchPad = bldg(BLDG.launch), rocket = new THREE.Group(); launchPad.add(r
 let rocketNose = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.7, 12), lam(0xff8a3d)); rocketNose.position.y = 1.95; rocket.add(rocketNose);
 const terminal = bldg(BLDG.terminal, -Math.PI / 2); terminal.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.2, 0.9), lam(0xf3e6cf))).children[0].position.y = 0.6;
 const rack = bldg(BLDG.rack, Math.PI / 2); rack.add(new THREE.Mesh(new THREE.BoxGeometry(0.25, 1.0, 2.4), lam(0xc9c2d6))).children[0].position.y = 0.5;
+// Moon Station hub: dome off-map to the west, airlock tube onto the deck (sim BLDG.hub is the solid, clean footprint)
+const hub = new THREE.Group(); hub.position.set(BLDG.hub.c, 0, HUB_W.z); scene.add(hub); blob(scene, 6.4, 6.4, HUB_W.x, HUB_W.z);
+{ const d = new THREE.Mesh(new THREE.SphereGeometry(2.45, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), lam(0xf3e6cf)); d.scale.y = 0.78; d.position.set(HUB_W.x - BLDG.hub.c, 0.3, 0); hub.add(d);
+  const t = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 3.4, 12), lam(0xc9c2d6)); t.rotation.z = Math.PI / 2; t.position.set(-0.55, 0.75, 0); hub.add(t); }
 const crewBay = bldg(BLDG.hangar, -Math.PI / 2); // hangar appears after the first storm (Keepers unlock then in the sim)
 crewBay.add(new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.3, 2.6), lam(0xf3e6cf))).children[0].position.y = 0.65;
 // floor pads: rounded ring (pad colour), inner glow when stood on, bright arc = paid progress for pay zones
@@ -370,7 +376,7 @@ function useAssets(gltf) {
   body.visible = helmet.visible = canShell.visible = false;
   astro = addOutline(ASSETS.clone('astronaut')); player.add(astro); bobObj = astro.getObjectByName('astro_body'); bobY = 0;
   canFill.geometry = new THREE.BoxGeometry(0.07, 1, 0.22); canFill.position.x = -0.54; bobObj.add(canFill);
-  swap(depot, 'depot'); swap(refinery, 'refinery'); swap(terminal, 'terminal'); swap(rack, 'rack');
+  if (ASSETS.has('hub')) swap(hub, 'hub'); swap(depot, 'depot'); swap(refinery, 'refinery'); swap(terminal, 'terminal'); swap(rack, 'rack');
   swap(crewBay, 'hangar', 0, -0.35); const rv = swap(crewBay, 'rover', Math.PI / 2, 0.55, 0.75); rv.scale.setScalar(0.7);
   launchPad.children.forEach(c => { if (c.isMesh) c.visible = false; }); addOutline(launchPad.add(ASSETS.clone('launchpad')).children.at(-1));
   rocket.children.forEach(c => { c.visible = false; }); const rk = addOutline(ASSETS.clone('rocket')); rocket.add(rk);
@@ -384,7 +390,7 @@ function useAssets(gltf) {
   SP.assets = 'glb';
 }
 SP.assets = 'loading';
-new GLTFLoader().load('assets/sweep-assets.glb?v=pass2', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
+new GLTFLoader().load('assets/sweep-assets.glb?v=pass3', useAssets, undefined, e => { SP.assets = 'fallback'; console.warn('assets/sweep-assets.glb not loaded, keeping primitive meshes', e); });
 // code animations: walk bob + sway, squash when a sale empties the canister, tool wobble while dust is being picked up
 const anim = { squash: 0, lastCan: 0, sweepT: 0, tierPop: 0, lastTool: 0 };
 function animatePlayer(S, p, dt) {
@@ -493,14 +499,16 @@ function updateWorld(S, realDt) {
   writeTiles(S);
   // camera: smooth follow, zoom-out with tool width, pull back to the planet on intro / every 10% Moon
   const a = 1 - Math.exp(-CAM.follow * realDt);
-  if (!camState.init) { camState.tx = p.x; camState.tz = p.y; camState.init = true; }
+  // near the base the camera leans toward the Depot + Moon Station hub so the start frame shows the station, not the map edge
+  const bw = CAM.baseBias * clamp(1 - Math.hypot(p.x - BASE_F.x, p.y - BASE_F.z) / 12, 0, 1), fx = p.x + (BASE_F.x - p.x) * bw, fz = p.y + (BASE_F.z - p.y) * bw;
+  if (!camState.init) { camState.tx = fx; camState.tz = fz; camState.init = true; }
   const la = p.moving ? CAM.lookAhead : 0, b2 = 1 - Math.exp(-2.5 * realDt); // eased look-ahead in the walking direction
   camState.ax += (Math.cos(p.face) * la - camState.ax) * b2; camState.az += (Math.sin(p.face) * la - camState.az) * b2;
-  camState.tx += (p.x + camState.ax - camState.tx) * a; camState.tz += (p.y + camState.az - camState.tz) * a;
+  camState.tx += (fx + camState.ax - camState.tx) * a; camState.tz += (fz + camState.az - camState.tz) * a;
   const baseD = CAM.dist * (1 + CAM.widthZoom * (toolWidth(S) - 1));
   camState.d += (baseD - camState.d) * a;
-  const d = Math.exp(lerp(Math.log(camState.d * (1 + 0.45 * Math.sin(Math.PI * clamp(1 - anim.tierPop / 1.2, 0, 1)) * (anim.tierPop > 0 ? 1 : 0))), Math.log(CAM.planetDist), k)), tx = lerp(camState.tx, C / 2, k), tz = lerp(camState.tz, R / 2, k);
-  const st = S.storm; if (st.phase === 'blow' && st.front > -2 && st.front < C + 2) shake = st.count ? 0.15 : 0.08; shake = Math.max(0, shake - realDt * 0.5);
+  const d = Math.exp(lerp(Math.log(camState.d * (1 + 0.45 * Math.sin(Math.PI * clamp(1 - anim.tierPop / 1.2, 0, 1)) * (anim.tierPop > 0 ? 1 : 0))), Math.log(CAM.planetDist), k)), intro = S.t < S.cfg.feel.introSec, tx = lerp(camState.tx, intro ? INTRO_F.x : C / 2, k), tz = lerp(camState.tz, intro ? INTRO_F.z : R / 2, k); // the intro descends onto the station + base
+  const st = S.storm; if (st.phase === 'blow' && st.front > -2 && st.front < C + 2) shake = st.count ? 0.06 : 0.03; shake = Math.max(0, shake - realDt * 0.5);
   const sh = shake * shake * 2;
   camera.position.set(tx + Math.sin(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh, Math.sin(pitch) * d, tz + Math.cos(yaw) * Math.cos(pitch) * d + (Math.random() - 0.5) * sh);
   camera.lookAt(tx, 0, tz);
@@ -875,6 +883,7 @@ function selfTest3d() {
   for (let i = 0; i < 10; i++) stepPayZones(T, 0.05); const toolHalf = T.tool === 0 && T.zonePaid.tool > 0;
   for (let i = 0; i < 30; i++) stepPayZones(T, 0.05); r.toolPayZone = toolHalf && T.tool === 1 && Math.abs(T.cash) < 1e-6 && T.zonePaid.tool === 0;
   T.crewOpen = true; T.player.x = ZONES.crew.c + 1; T.player.y = ZONES.crew.r + 1; stepPayZones(T, 0.05); r.freeKeeper = T.keepers.length === 1;
+  if (ASSETS) r.hubAsset = ASSETS.has('hub');
   if (ASSETS) r.toolAssets = CONFIG.tools.every((t, k) => ASSETS.has('tool' + k) && (k < 4 || ASSETS.has('veh' + k)));
   r.padsOutsideDepot = Object.values(ZONES).every(z => z.c >= DEPOT.c + DEPOT.w || z.c + z.w <= DEPOT.c || z.r >= DEPOT.r + DEPOT.h || z.r + z.h <= DEPOT.r);
   r.inputMatchesCamera = Math.abs(v.x + Math.sin(yaw)) < 1e-9 && Math.abs(v.y + Math.cos(yaw)) < 1e-9; // "up" on screen = away from camera

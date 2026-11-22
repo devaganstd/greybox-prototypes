@@ -79,6 +79,7 @@ const PADZ = { // stand-on pads (3D: panel or pay zone)
 const BLDG = { // building plates; the building is solid inside its plate (inset 0.15)
   terminal: { c: 3, r: 61, w: 3, h: 1 }, rack: { c: 3, r: 70, w: 3, h: 1 }, hangar: { c: 3, r: 55, w: 3, h: 2 },
   refinery: { c: 16, r: 64, w: 2, h: 2 }, launch: { c: 16, r: 61, w: 2, h: 2 },
+  hub: { c: 0, r: 63, w: 2, h: 3 }, // Moon Station airlock: the dome sits off-map to the west, its tube opens onto the deck here
 };
 // gate pads straddle the border of the sector they open (half on each side; the player stands on the open half)
 const PADS = [null, { c: 23, r: 57, w: 2, h: 2 }, { c: 10, r: 47, w: 2, h: 2 }, { c: 23, r: 34, w: 2, h: 2 }, { c: 10, r: 23, w: 2, h: 2 }, { c: 23, r: 10, w: 2, h: 2 }];
@@ -552,6 +553,9 @@ function selfTest() {
   const Q = newGame(clone(CONFIG), { headless: true }); Q.player.x = 7.5; Q.player.y = 64; for (let k = 0; k < 40; k++) step(Q, 0.05, { x: 1, y: 0 });
   const rk = ROCKS[0]; Q.player.x = rk.x - 1; Q.player.y = rk.y; Q.player.face = 0;
   out.solidsBlock = Q.player.x > rk.x - 1.01 && headPos(Q).x <= rk.x - rk.rad + 1e-9 && (() => { const Z = newGame(clone(CONFIG), { headless: true }); Z.player.x = 7.5; Z.player.y = 64; for (let k = 0; k < 40; k++) step(Z, 0.05, { x: 1, y: 0 }); return Z.player.x > SELL.c && Z.player.x < DEPOT.c + 0.45 && Z.tele.firstSell !== null; })(); // stopped at the wall and sold there
+  // station hub airlock: clean foundation, solid; walking down column 1 from the north stops at its wall
+  const Hb = BLDG.hub, Hw = newGame(clone(CONFIG), { headless: true }); Hw.player.x = 1; Hw.player.y = Hb.r - 1.5; for (let k = 0; k < 40; k++) step(Hw, 0.05, { x: 0, y: 1 });
+  out.hubSolid = KIND[(Hb.r + 1) * C + Hb.c] === 2 && blocked(Hb.c + 1, Hb.r + 1.5, 0.3) && Hw.player.y < Hb.r + 0.15 && Hw.player.y > Hb.r - 1;
   // a toothbrush tile needs exactly 3 passes; a storm tile drops to dirtAfter; a Keeper re-lights it
   const T = newGame(clone(CONFIG), { headless: true }); const i0 = 60 * C + 5;
   passTile(T, i0, 1 / 3, true); passTile(T, i0, 1 / 3, true); const before = T.dirt[i0] > 0; passTile(T, i0, 1 / 3, true);

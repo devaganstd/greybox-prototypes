@@ -583,6 +583,12 @@ function selfTest() {
   for (let k = 0; k < Sp.cfg.tools.length; k++) for (const lv of [0, UG.speed.max, 99]) { Sp.tool = k; Sp.up.speed = lv; capOk = capOk && playerSpeed(Sp) <= Sp.cfg.player.speed * Sp.cfg.tools[k].speedMult * (1 + UG.speed.cap) + 1e-9; }
   const maxed = newGame(clone(CONFIG), { headless: true }); UPS.forEach(id => maxed.up[id] = UG[id].max);
   out.balance = capOk && UPS.every(id => costOf(maxed, id) === null) && upBonus(maxed, 'width') === 2 && upBonus(maxed, 'speed') <= UG.speed.cap + 1e-9;
+  // blockers: every collider sits inside the map on a building / Depot plate or a rock tile (never on open deck or dust);
+  // the 3D layer's selfTest3d checks each collider also has a visible building (noInvisibleSolids). Walking is otherwise
+  // stopped only by the map edge or a locked sector (gate pad + border markers).
+  const footOk = SOLIDS.every(b => b.x0 >= 0 && b.y0 >= 0 && b.x1 <= C && b.y1 <= R && KIND[Math.floor((b.y0 + b.y1) / 2) * C + Math.floor((b.x0 + b.x1) / 2)] !== 0);
+  let cellsOk = true; for (let i = 0; i < N; i++) { const x = i % C + 0.5, y = ((i / C) | 0) + 0.5; if (blocked(x, y, 0) && !(KIND[i] === 2 || KIND[i] === 3 || inRectT(x, y, DEPOT))) cellsOk = false; }
+  out.noStrayBlockers = footOk && cellsOk && ROCKS.every(k => KIND[k.r * C + k.c] === 3);
   // station hub airlock: clean foundation, solid; walking down column 1 from the north stops at its wall
   const Hb = BLDG.hub, Hw = newGame(clone(CONFIG), { headless: true }); Hw.player.x = 1; Hw.player.y = Hb.r - 1.5; for (let k = 0; k < 40; k++) step(Hw, 0.05, { x: 0, y: 1 });
   out.hubSolid = KIND[(Hb.r + 1) * C + Hb.c] === 2 && blocked(Hb.c + 1, Hb.r + 1.5, 0.3) && Hw.player.y < Hb.r + 0.15 && Hw.player.y > Hb.r - 1;

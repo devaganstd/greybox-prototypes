@@ -60,7 +60,7 @@ const ZONES = {
   refinery: Object.assign({ kind: 'panel', label: 'REFINERY', bg: PAL.purple }, PADZ.refinery),
   launch: Object.assign({ kind: 'panel', label: 'LAUNCH', bg: PAL.orange }, PADZ.launch),
 };
-const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 21, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.8 };
+const CAM = { fov: 38, pitchDeg: 52, yawDeg: 30, dist: 30, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.8 };
 const errBox = document.getElementById('err');
 addEventListener('error', e => { errBox.style.display = 'block'; errBox.textContent += (e.message || e) + '\n'; });
 

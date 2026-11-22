@@ -83,7 +83,7 @@ const C = 48, R = 72, N = C * R;
 const PLAZA = { c: 0, r: 50, w: 8, h: 22 };
 const DEPOT = { c: 3, r: 60, w: 4, h: 4 }; // Depot plate; the building fills it except a 0.45 rim, standing at its wall sells
 const DEPOT_C = { x: DEPOT.c + 2, y: DEPOT.r + 2 };
-const SELL = { c: DEPOT.c - 0.45, r: DEPOT.r - 0.45, w: DEPOT.w + 0.9, h: DEPOT.h + 0.9 }; // touching the building's wall sells (walk steps stop up to 0.3 short of it)
+const SELL = { c: DEPOT.c - 0.9, r: DEPOT.r - 0.9, w: DEPOT.w + 1.8, h: DEPOT.h + 1.8 }; // touching the building's wall sells (walk steps stop up to 0.3 short of it)
 const PADZ = { // stand-on pads (3D: panel or pay zone)
   terminal: { c: 1, r: 56, w: 3, h: 3 }, tool: { c: 1, r: 67, w: 3, h: 3 }, crew: { c: 5, r: 67, w: 3, h: 3 },
   refinery: { c: 5, r: 56, w: 2, h: 2 }, launch: { c: 5, r: 51, w: 2, h: 2 },

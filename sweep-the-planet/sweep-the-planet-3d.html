@@ -36,7 +36,7 @@
 <div id="err"></div>
 <div id="cap"></div>
 <!-- Simulation shared with the 2D greybox (same CONFIG, bot, telemetry, selfTest). Only render + input live in this file. -->
-<script src="sweep-sim.js?v=label1"></script>
+<script src="sweep-sim.js?v=frame1"></script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
 <script type="module">
 // Sweep the Planet 3D greybox: Three.js r160 (local copy in lib/, MIT, see lib/three-LICENSE.txt).
@@ -63,7 +63,7 @@ const ZONES = {
   refinery: Object.assign({ kind: 'panel', label: 'REFINERY', bg: PAL.purple }, PADZ.refinery),
   launch: Object.assign({ kind: 'panel', label: 'LAUNCH', bg: PAL.orange }, PADZ.launch),
 };
-const CAM = { fov: 36, pitchDeg: 56, yawDeg: 30, dist: 58, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 0.8 };
+const CAM = { fov: 36, pitchDeg: 56, yawDeg: 15, dist: 58, follow: 4.5, widthZoom: 0.07, planetDist: 175, planetPitchDeg: 30, lookAhead: 0.8, baseBias: 1 };
 const errBox = document.getElementById('err');
 addEventListener('error', e => { errBox.style.display = 'block'; errBox.textContent += (e.message || e) + '\n'; });
 
@@ -248,7 +248,7 @@ scene.add(new THREE.Mesh(groundGeo, groundMat));
 const terrainMat = new THREE.ShaderMaterial({ uniforms: { uSun: sunU, uReg: regU, uAlarm: alarmU },
   vertexShader: 'varying vec3 vW; varying vec3 vN; void main(){ vW = (modelMatrix * vec4(position, 1.0)).xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0); }',
   fragmentShader: 'precision highp float; varying vec3 vW; varying vec3 vN;' + REGOLITH_GLSL + ' void main(){ gl_FragColor = vec4(alarm(regolith(vW.xz, normalize(vN))), 1.0); }' });
-const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 4.5, z: 59 }, INTRO_F = { x: 1, z: 59 }, K_EST = Math.log(100 / 58) / Math.log(175 / 58); // hub dome centre (world); camera focus near the base
+const HUB_W = { x: -3.4, z: BLDG.hub.r + BLDG.hub.h / 2 }, BASE_F = { x: 4, z: 59 }, INTRO_F = { x: 4, z: 59 }, K_EST = Math.log(100 / 58) / Math.log(175 / 58); // hub dome centre (world); camera focus near the base
 const MOON_R = 150, MOON_C = new THREE.Vector3(C / 2, -0.4 - MOON_R, R / 2);
 const CRATERS = [[-14, 20, 5], [62, 8, 7], [58, 60, 4.5], [-10, 66, 6], [20, -12, 6], [70, 90, 8], [-22, 45, 4], [30, 86, 5], [80, 35, 5], [5, 95, 7], [-40, -10, 9], [95, 70, 9]];
 function terrainH(x, z) {
@@ -610,7 +610,8 @@ function updateWorld(S, realDt) {
   // camera: smooth follow, zoom-out with tool width, pull back to the planet on intro / every 10% Moon
   const a = 1 - Math.exp(-CAM.follow * realDt);
   // near the base the camera leans toward the Depot + Moon Station hub so the start frame shows the station, not the map edge
-  const bw = CAM.baseBias * clamp(1 - Math.hypot(p.x - BASE_F.x, p.y - BASE_F.z) / 14, 0, 1), fx = p.x + (BASE_F.x - p.x) * bw, fz = p.y + (BASE_F.z - p.y) * bw;
+  // on the plaza the camera holds the whole station strip (BASE_F = strip centre); it eases to the player over ~10 tiles into the field
+  const pd = Math.hypot(Math.max(PLAZA.c - p.x, p.x - PLAZA.c - PLAZA.w, 0), Math.max(PLAZA.r - p.y, p.y - PLAZA.r - PLAZA.h, 0)), bw = CAM.baseBias * clamp(1 - pd / 10, 0, 1), fx = p.x + (BASE_F.x - p.x) * bw, fz = p.y + (BASE_F.z - p.y) * bw;
   if (!camState.init) { camState.tx = fx; camState.tz = fz; camState.init = true; }
   const la = p.moving ? CAM.lookAhead : 0, b2 = 1 - Math.exp(-2.5 * realDt); // eased look-ahead in the walking direction
   camState.ax += (Math.cos(p.face) * la - camState.ax) * b2; camState.az += (Math.sin(p.face) * la - camState.az) * b2;
